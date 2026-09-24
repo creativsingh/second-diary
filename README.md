@@ -12,13 +12,30 @@ Second Diary is designed to be **privacy-focused, AI-native, self-hostable, loca
 
 ## 🚧 Project Status
 
-**Second Diary is currently in early development.**
+**Second Diary is currently in active early development (Alpha).**
 
-The project is not yet ready for production use.
+The core local desktop application, local SQLite persistence layer, and editorial journaling interface are functional, while APIs, schemas, and AI integration are actively evolving. Do not rely on early development builds as your sole storage location for irreplaceable personal memories.
 
-The architecture, APIs, database schema, AI systems, and user experience may change significantly during development.
+### ✅ What's Working Today
 
-Do not use early development versions as the only storage location for important or irreplaceable personal data.
+* **Local-First Desktop Shell**: Tauri v2 + React 19 + TypeScript + Vite desktop application running natively without external cloud dependencies.
+* **Embedded SQLite & Drizzle ORM**: 100% offline, local database storage with migrations. No network requests are made.
+* **Journal Entries & Autosave**: Seamless creation, editing, debounced local autosaving, and persistence across app restarts.
+* **Local Full-Text Search (SQLite FTS5)**: Instant offline search across entry titles and contents with snippet generation, keyword highlighting, and BM25 ranking.
+* **Modern 3-Column Editorial Interface**:
+  * *Collapsible Nav Sidebar*: Minimalist toggle between **Journal** and **Ask Diary**.
+  * *Middle Panel*: Date-grouped list view and interactive month mini-calendar view.
+  * *Main Editor*: Distraction-free typography (Lora serif + Inter sans), auto-resizing title, word counter, and private local status indicators.
+* **Ask Diary UI Shell**: Conversational query layout prepared for local AI memory integration.
+* **Automated Verification**: End-to-end Node.js test suite for SQLite lifecycle and FTS5 query operations.
+
+### 🔄 In Progress & Coming Soon
+
+- [ ] **Local AI & Semantic Memory**: On-device vector embeddings and local LLM integration for natural language memory retrieval.
+- [ ] **Enhanced Tagging & Filtering**: Tag browsing, mood tracking, and multi-faceted archive exploration.
+- [ ] **Data Export & Portability**: One-click exports to Markdown, JSON, and standard formats.
+- [ ] **Voice Dictation**: Offline local speech-to-text integration for quick voice journaling.
+- [ ] **Attachments & Media**: Local photo and file attachments linked to entries.
 
 ---
 
@@ -293,18 +310,14 @@ The exact deployment architecture is still under development.
 
 # 🛠️ Technology
 
-The technology stack is currently being established.
+Second Diary is built using a modern, local-first stack designed for performance, longevity, and data privacy:
 
-The project prioritizes technologies that are:
-
-* Free to use
-* Open source
-* Self-hostable
-* Well maintained
-* Widely supported
-* Suitable for long-term development
-
-The final stack and architecture will be documented as implementation progresses.
+* **Desktop Runtime**: [Tauri v2](https://tauri.app/) (Rust) for minimal footprint, memory safety, and native system integration.
+* **Frontend**: [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), and [Vite 8](https://vite.dev/).
+* **Styling & Design**: [Tailwind CSS v4](https://tailwindcss.com/) with custom editorial design tokens and typography (Inter + Lora).
+* **Local Database**: Embedded [SQLite](https://sqlite.org/) with **FTS5** (Full-Text Search) and BM25 ranking.
+* **ORM**: [Drizzle ORM](https://orm.drizzle.team/) for type-safe schema definitions and local migrations.
+* **Zero Remote Network Calls**: Designed strictly for offline, on-device execution.
 
 ---
 
@@ -347,35 +360,50 @@ Detailed technical decisions will be documented in `docs/`.
 
 # 💻 Platforms
 
-Development will initially focus on the **web application**.
+Second Diary is currently built as a native desktop application powered by Tauri v2:
 
-Future platforms may include:
-
-* Web
-* macOS
-* Windows
-* Linux
-* iOS
-* Android
-
-Platform priorities may change as development progresses.
+* **Desktop (Active Target)**: macOS, Linux, Windows
+* **Web (Companion / Self-hosted)**: In roadmap
+* **Mobile (iOS & Android)**: In roadmap
 
 ---
 
 # 🚀 Getting Started
 
-Second Diary is currently under active development.
+### Prerequisites
 
-Detailed installation instructions will be added once the initial development environment and application architecture are established.
+* [Node.js](https://nodejs.org/) (v20+ recommended)
+* [Rust & Cargo](https://rustup.rs/) (for Tauri desktop runtime)
 
-For now:
+### Installation & Development
 
 ```bash
+# 1. Clone the repository
 git clone https://github.com/YOUR_USERNAME/second-diary.git
 cd second-diary
+
+# 2. Install dependencies
+npm install
+
+# 3. Run the desktop application in development mode
+npm run tauri dev
+
+# Alternatively, run the web UI preview
+npm run dev
 ```
 
-> Installation and development commands will be documented here as the project reaches a usable development state.
+### Running Tests & Building
+
+```bash
+# Run the local SQLite & FTS5 automated test suite
+npm test
+
+# Build the production web bundle
+npm run build
+
+# Package the native desktop application
+npm run tauri build
+```
 
 ---
 
