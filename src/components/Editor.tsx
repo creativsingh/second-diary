@@ -60,6 +60,13 @@ export function Editor({
     }
   }, [entry?.title]);
 
+  // Focus title when a newly created or empty entry is selected
+  useEffect(() => {
+    if (entry && !entry.title && !entry.body && titleRef.current) {
+      titleRef.current.focus();
+    }
+  }, [entry?.id]);
+
   if (!entry) {
     return (
       <div className="flex-1 flex items-center justify-center text-[#c0bbb4] text-[13px]">

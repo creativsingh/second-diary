@@ -10,6 +10,7 @@ interface SidebarProps {
   activeTag: string | null;
   onSelectTag: (tag: string) => void;
   topTags: string[];
+  onNewEntry?: () => void;
 }
 
 export function Sidebar({
@@ -20,6 +21,7 @@ export function Sidebar({
   activeTag,
   onSelectTag,
   topTags,
+  onNewEntry,
 }: SidebarProps) {
   return (
     <nav
@@ -34,7 +36,7 @@ export function Sidebar({
         <button
           type="button"
           onClick={onToggleSidebar}
-          className="flex items-center gap-2.5 mb-8 w-full text-left outline-none cursor-pointer group"
+          className="flex items-center gap-2.5 mb-5 w-full text-left outline-none cursor-pointer group"
           title={sidebarOpen ? "Close drawer" : "Open drawer"}
           aria-label={sidebarOpen ? "Close drawer" : "Open drawer"}
         >
@@ -54,6 +56,25 @@ export function Sidebar({
             </span>
           )}
         </button>
+
+        {/* Main CTA: New Entry */}
+        {onNewEntry && (
+          <button
+            type="button"
+            onClick={onNewEntry}
+            className={`w-full mb-4 flex items-center gap-2 rounded-lg bg-[#1c1a18] text-white hover:bg-[#3a3530] transition-all cursor-pointer shadow-xs ${
+              sidebarOpen
+                ? "px-3 py-2 text-[12px] font-medium justify-start"
+                : "p-2 justify-center"
+            }`}
+            title="New Entry (⌘N)"
+          >
+            <span className="shrink-0 flex items-center justify-center">
+              <Ic.plus />
+            </span>
+            {sidebarOpen && <span className="whitespace-nowrap">New Entry</span>}
+          </button>
+        )}
 
         {/* Navigation Items */}
         <div className="space-y-1">

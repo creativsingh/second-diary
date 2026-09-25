@@ -67,25 +67,41 @@ class BrowserFallbackDb {
     }
   }
 
+  private toDbRow(e: Entry) {
+    const createdMs = e.createdAt instanceof Date ? e.createdAt.getTime() : new Date(e.createdAt).getTime();
+    const updatedMs = e.updatedAt instanceof Date ? e.updatedAt.getTime() : new Date(e.updatedAt).getTime();
+    return {
+      id: e.id,
+      date: e.date,
+      title: e.title,
+      content: e.content,
+      created_at: Math.floor(createdMs / 1000),
+      updated_at: Math.floor(updatedMs / 1000),
+    };
+  }
+
   async select<T = any>(sql: string, params: unknown[] = []): Promise<T> {
     const list = this.getEntries();
-    const lower = sql.toLowerCase();
-    if (lower.includes("where")) {
-      if (lower.includes("id =") || lower.includes("id=")) {
+    const cleanSql = sql.toLowerCase().replace(/["`]/g, "");
+
+    if (cleanSql.includes("where")) {
+      if (cleanSql.includes(".id =") || cleanSql.includes(" id =")) {
         const targetId = String(params[0] ?? "");
         const match = list.find((e) => e.id === targetId);
-        return (match ? [match] : []) as unknown as T;
+        return (match ? [this.toDbRow(match)] : []) as unknown as T;
       }
-      if (lower.includes("date =") || lower.includes("date=")) {
+      if (cleanSql.includes(".date =") || cleanSql.includes(" date =")) {
         const targetDate = String(params[0] ?? "");
         const matches = list.filter((e) => e.date === targetDate);
-        return matches.sort((a, b) => {
+        matches.sort((a, b) => {
           const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
           const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
           return timeB - timeA;
-        }) as unknown as T;
+        });
+        return matches.map((m) => this.toDbRow(m)) as unknown as T;
       }
     }
+
     // Return chronologically descending (newest date first, then newest createdAt first)
     const sorted = [...list].sort((a, b) => {
       const dateCmp = b.date.localeCompare(a.date);
@@ -94,14 +110,14 @@ class BrowserFallbackDb {
       const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
       return timeB - timeA;
     });
-    return sorted as unknown as T;
+    return sorted.map((m) => this.toDbRow(m)) as unknown as T;
   }
 
   async execute(sql: string, params: unknown[] = []) {
     const list = this.getEntries();
-    const lower = sql.toLowerCase();
+    const cleanSql = sql.toLowerCase().replace(/["`]/g, "");
 
-    if (lower.startsWith("insert")) {
+    if (cleanSql.startsWith("insert")) {
       const newEntry: Entry = {
         id: String(params[0]),
         date: String(params[1]),
@@ -115,7 +131,7 @@ class BrowserFallbackDb {
       return { rowsAffected: 1, lastInsertId: 1 };
     }
 
-    if (lower.startsWith("update")) {
+    if (cleanSql.startsWith("update")) {
       const title = String(params[0] ?? "");
       const content = String(params[1] ?? "");
       const updatedAt = new Date((Number(params[2]) || Math.floor(Date.now() / 1000)) * 1000);
@@ -135,7 +151,7 @@ class BrowserFallbackDb {
       return { rowsAffected: changed ? 1 : 0, lastInsertId: undefined };
     }
 
-    if (lower.startsWith("delete")) {
+    if (cleanSql.startsWith("delete")) {
       const targetId = String(params[0] ?? "");
       const before = list.length;
       const filtered = list.filter((e) => e.id !== targetId);

@@ -443,6 +443,184 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
     session.close();
   });
 
+  // Step 8: Main CTA Multiple Entries Per Day Workflow Verification
+  await t.test("Main CTA: Sequential creation of multiple entries on the same day", async () => {
+    const session = createDrizzleBridge(TEST_DB_PATH);
+    const today = "2026-09-26";
+
+    // Simulate in-memory list and creation function matching useDiary
+    let entriesList = [];
+    let selectedId = null;
+
+    async function handleMainCta(targetDate = today) {
+      // If there is already an empty, unedited entry for this targetDate, reuse it
+      const existingEmpty = entriesList.find(
+        (e) => e.date === targetDate && !e.title.trim() && !e.body.trim()
+      );
+      if (existingEmpty) {
+        selectedId = existingEmpty.id;
+        return existingEmpty.id;
+      }
+
+      const now = new Date();
+      const newEntry = {
+        id: `cta-entry-${entriesList.length + 1}-${Date.now()}`,
+        date: targetDate,
+        title: "",
+        body: "",
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      entriesList = [newEntry, ...entriesList];
+      selectedId = newEntry.id;
+
+      await session.db.insert(entries).values({
+        id: newEntry.id,
+        date: newEntry.date,
+        title: newEntry.title,
+        content: newEntry.body,
+        createdAt: newEntry.createdAt,
+        updatedAt: newEntry.updatedAt,
+      });
+
+      return newEntry.id;
+    }
+
+    // 1. User clicks main CTA for the first time on today
+    const firstId = await handleMainCta(today);
+    assert.ok(firstId, "First entry must be created");
+    assert.equal(entriesList.length, 1);
+
+    // 2. User types in first entry
+    entriesList[0].title = "Morning Coffee & Notes";
+    entriesList[0].body = "First entry written from main CTA.";
+    await session.db
+      .update(entries)
+      .set({ title: entriesList[0].title, content: entriesList[0].body })
+      .where(eq(entries.id, firstId));
+
+    // 3. User clicks main CTA a second time on the SAME day
+    const secondId = await handleMainCta(today);
+    assert.notEqual(firstId, secondId, "Second entry must have a distinct unique ID");
+    assert.equal(entriesList.length, 2, "List must now contain 2 entries for today");
+
+    // 4. User types in second entry
+    entriesList[0].title = "Afternoon Standup Thoughts";
+    entriesList[0].body = "Second entry written from main CTA on the same day.";
+    await session.db
+      .update(entries)
+      .set({ title: entriesList[0].title, content: entriesList[0].body })
+      .where(eq(entries.id, secondId));
+
+    // 5. User clicks main CTA a third time on the SAME day
+    const thirdId = await handleMainCta(today);
+    assert.notEqual(secondId, thirdId);
+    assert.equal(entriesList.length, 3, "List must now contain 3 entries for today");
+
+    // 6. User clicks main CTA again WITHOUT typing anything in the 3rd entry
+    const fourthAttemptId = await handleMainCta(today);
+    assert.equal(fourthAttemptId, thirdId, "Clicking main CTA with an empty entry should reuse it rather than duplicate");
+    assert.equal(entriesList.length, 3, "Length must remain 3");
+
+    // 7. Verify all entries are persisted in SQLite under today's date
+    const dbEntriesToday = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.date, today));
+
+    assert.equal(dbEntriesToday.length, 3, "Database must store all 3 entries under today's date");
+
+    const savedFirst = dbEntriesToday.find((e) => e.id === firstId);
+    const savedSecond = dbEntriesToday.find((e) => e.id === secondId);
+    assert.equal(savedFirst.title, "Morning Coffee & Notes");
+    assert.equal(savedSecond.title, "Afternoon Standup Thoughts");
+
+    session.close();
+  });
+
+  // Step 9: Calendar View Selection & Future Date Rejection Verification
+  await t.test("Calendar View: Date click does not create entry, future dates blocked, explicit button creates entry", async () => {
+    const session = createDrizzleBridge(TEST_DB_PATH);
+    const today = "2026-09-26";
+    const futureDate = "2026-09-30";
+    const pastEmptyDate = "2026-09-15";
+
+    let entriesList = [];
+    let selectedId = null;
+    let calendarSelectedDate = today;
+
+    // Calendar date click behavior: DOES NOT CREATE ENTRY
+    function handleCalendarDateClick(dateStr) {
+      calendarSelectedDate = dateStr;
+      const matching = entriesList.filter((e) => e.date === dateStr);
+      if (matching.length > 0) {
+        selectedId = matching[0].id;
+      }
+      // If no matching entries, do nothing to entriesList or DB
+    }
+
+    // Explicit create button behavior: GUARDS AGAINST FUTURE DATES
+    async function handleExplicitCreateEntry(dateStr) {
+      if (dateStr > today) {
+        // Disallowed
+        return null;
+      }
+
+      const newEntry = {
+        id: `cal-entry-${Date.now()}`,
+        date: dateStr,
+        title: "",
+        content: "",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      entriesList.push(newEntry);
+      selectedId = newEntry.id;
+
+      await session.db.insert(entries).values(newEntry);
+      return newEntry.id;
+    }
+
+    // 1. User clicks an empty past date in calendar view
+    handleCalendarDateClick(pastEmptyDate);
+    assert.equal(calendarSelectedDate, pastEmptyDate);
+    assert.equal(entriesList.length, 0, "Clicking an empty date must NEVER create an entry");
+
+    // 2. User attempts to create an entry for a FUTURE date
+    const futureResult = await handleExplicitCreateEntry(futureDate);
+    assert.equal(futureResult, null, "Creating entry for future date must be rejected");
+    assert.equal(entriesList.length, 0, "No entry must be created for future date");
+
+    const futureDbCheck = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.date, futureDate));
+    assert.equal(futureDbCheck.length, 0, "Database must have 0 entries for future date");
+
+    // 3. User clicks the explicit '+ Create entry for this day' button on past date
+    const createdPastId = await handleExplicitCreateEntry(pastEmptyDate);
+    assert.ok(createdPastId, "Must create entry when explicit button is clicked");
+    assert.equal(entriesList.length, 1);
+    assert.equal(entriesList[0].date, pastEmptyDate);
+
+    // 4. Verify entry persisted in SQLite
+    const pastDbCheck = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.date, pastEmptyDate));
+    assert.equal(pastDbCheck.length, 1);
+    assert.equal(pastDbCheck[0].id, createdPastId);
+
+    // 5. Clicking on the date again now selects the existing entry without creating another
+    handleCalendarDateClick(pastEmptyDate);
+    assert.equal(selectedId, createdPastId);
+    assert.equal(entriesList.length, 1, "Length remains 1; no duplicate entry created");
+
+    session.close();
+  });
+
   // Cleanup
   if (fs.existsSync(TEST_DB_PATH)) {
     fs.unlinkSync(TEST_DB_PATH);

@@ -147,11 +147,11 @@ export function JournalPanel({
         {viewMode === "calendar" ? (
           <CalendarView
             entries={entries}
+            selectedId={selectedId}
             todayDate={todayDate}
-            onSelectDate={(dateStr) => {
-              onSelectDate(dateStr);
-              setViewMode("list");
-            }}
+            onSelectEntry={onSelectEntry}
+            onNewEntry={onNewEntry}
+            onSelectDate={onSelectDate}
           />
         ) : searchQuery.trim() ? (
           /* FTS5 / Filtered search results view */
@@ -207,17 +207,19 @@ export function JournalPanel({
                     <span className="text-[9px] text-[#c0bbb4] font-normal lowercase tracking-normal">
                       {group.items.length} {group.items.length === 1 ? "entry" : "entries"}
                     </span>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onNewEntry(group.date);
-                      }}
-                      className="opacity-0 group-hover/header:opacity-100 hover:text-[#1c1a18] p-0.5 rounded hover:bg-[#ece9e4] transition-all cursor-pointer"
-                      title={`Add entry for ${formatRelativeDate(group.date, todayDate)}`}
-                    >
-                      <Ic.plus />
-                    </button>
+                    {group.date <= todayDate && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onNewEntry(group.date);
+                        }}
+                        className="opacity-0 group-hover/header:opacity-100 hover:text-[#1c1a18] p-0.5 rounded hover:bg-[#ece9e4] transition-all cursor-pointer"
+                        title={`Add entry for ${formatRelativeDate(group.date, todayDate)}`}
+                      >
+                        <Ic.plus />
+                      </button>
+                    )}
                   </div>
                 </div>
 

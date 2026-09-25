@@ -237,6 +237,12 @@ export function useDiary() {
   // Create new empty entry for a date (or today). If forceNew is false, select existing entry if found.
   const createEntryForDate = useCallback(
     async (targetDate: string = todayDate, forceNew: boolean = false) => {
+      // Disallow creating entries for future dates
+      if (targetDate > todayDate) {
+        console.warn(`[useDiary] Cannot create entry for future date: ${targetDate}`);
+        return null;
+      }
+
       // If not forcing a new entry, select the most recent existing entry for that date
       if (!forceNew) {
         const existing = entries.find((e) => e.date === targetDate);
@@ -246,14 +252,25 @@ export function useDiary() {
         }
       }
 
-      // If the currently selected entry is on targetDate and is completely empty, reuse it
-      if (
-        selectedEntry &&
-        selectedEntry.date === targetDate &&
-        !selectedEntry.title.trim() &&
-        !selectedEntry.body.trim()
-      ) {
-        return selectedEntry.id;
+      // If there is already an empty, unedited entry for this targetDate, select that one rather than creating a duplicate blank
+      const existingEmpty = entries.find(
+        (e) => e.date === targetDate && !e.title.trim() && !e.body.trim()
+      );
+      if (existingEmpty) {
+        setSelectedId(existingEmpty.id);
+        return existingEmpty.id;
+      }
+
+      // Flush pending save for outgoing entry if needed
+      if (saveTimeoutRef.current && latestEntryRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+        saveEntry({
+          id: latestEntryRef.current.id,
+          date: latestEntryRef.current.date,
+          title: latestEntryRef.current.title,
+          content: latestEntryRef.current.body,
+        }).catch((err) => console.error("[useDiary] Flush save failed:", err));
       }
 
       const now = new Date();
@@ -286,7 +303,7 @@ export function useDiary() {
 
       return newEntry.id;
     },
-    [entries, selectedEntry, todayDate]
+    [entries, todayDate]
   );
 
   // Delete an entry by ID (or delete currently selected entry)
@@ -377,8 +394,13 @@ export function useDiary() {
     isLoading,
     updateCurrentEntry,
     createEntryForDate,
-    createNewEntry: (targetDate: string = todayDate) =>
-      createEntryForDate(targetDate, true),
+    createNewEntry: (targetDate: string = todayDate) => {
+      if (targetDate > todayDate) {
+        console.warn(`[useDiary] Cannot create entry for future date: ${targetDate}`);
+        return Promise.resolve(null);
+      }
+      return createEntryForDate(targetDate, true);
+    },
     deleteEntry: deleteEntryById,
     searchQuery,
     setSearchQuery,

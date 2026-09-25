@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Sidebar } from "@/components/Sidebar";
 import { JournalPanel } from "@/components/JournalPanel";
 import { Editor } from "@/components/Editor";
@@ -24,7 +24,6 @@ export default function App() {
     topTags,
     saveStatus,
     updateCurrentEntry,
-    createEntryForDate,
     createNewEntry,
     deleteEntry,
     searchQuery,
@@ -32,6 +31,19 @@ export default function App() {
     searchResults,
     isSearching,
   } = useDiary();
+
+  // Global shortcut: ⌘N / Ctrl+N to trigger main CTA (New Entry)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setNav("journal");
+        createNewEntry(todayDate);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [createNewEntry, todayDate]);
 
   // AI Chat state
   const [aiHistory, setAiHistory] = useState<{ q: string; a: string }[]>([]);
@@ -132,6 +144,10 @@ export default function App() {
         activeTag={activeTag}
         onSelectTag={setActiveTag}
         topTags={topTags}
+        onNewEntry={() => {
+          setNav("journal");
+          createNewEntry(todayDate);
+        }}
       />
 
       {/* COLUMN 2 — Middle Panel (260px) */}
@@ -142,7 +158,12 @@ export default function App() {
           todayDate={todayDate}
           onSelectEntry={setSelectedId}
           onNewEntry={(date) => createNewEntry(date || todayDate)}
-          onSelectDate={(d) => createEntryForDate(d, false)}
+          onSelectDate={(d) => {
+            const matching = entries.find((e) => e.date === d);
+            if (matching) {
+              setSelectedId(matching.id);
+            }
+          }}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           searchResults={searchResults}
