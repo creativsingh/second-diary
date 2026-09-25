@@ -6,7 +6,7 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
  */
 export const entries = sqliteTable("entries", {
   id: text("id").primaryKey(),
-  date: text("date").notNull().unique(), // Format: YYYY-MM-DD in local time
+  date: text("date").notNull(), // Format: YYYY-MM-DD in local time (allows multiple entries per day)
   title: text("title").notNull().default(""),
   content: text("content").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp" })

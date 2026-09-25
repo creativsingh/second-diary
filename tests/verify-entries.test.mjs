@@ -10,7 +10,7 @@ import { eq, desc } from "drizzle-orm";
 // Define the exact schema as specified in requirement 3
 const entries = sqliteTable("entries", {
   id: text("id").primaryKey(),
-  date: text("date").notNull().unique(),
+  date: text("date").notNull(),
   title: text("title").notNull().default(""),
   content: text("content").notNull().default(""),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
@@ -46,13 +46,14 @@ function createDrizzleBridge(dbFilePath) {
   rawDb.exec(`
     CREATE TABLE IF NOT EXISTS entries (
       id TEXT PRIMARY KEY NOT NULL,
-      date TEXT NOT NULL UNIQUE,
+      date TEXT NOT NULL,
       title TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS entries_date_unique ON entries (date);
+    DROP INDEX IF EXISTS entries_date_unique;
+    CREATE INDEX IF NOT EXISTS entries_date_idx ON entries (date);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
       id UNINDEXED,
@@ -351,6 +352,93 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
     assert.equal(newResults.length, 1);
     assert.equal(newResults[0].date, "2026-09-20");
     assert.ok(newResults[0].snippet.includes("<mark>Tahoe</mark>"));
+
+    session.close();
+  });
+
+  // Step 7: Multiple Entries Per Day Verification
+  await t.test("Multiple entries per day: create multiple entries for the same date, verify isolation, order, and FTS5 search", async () => {
+    const session = createDrizzleBridge(TEST_DB_PATH);
+
+    const testDay = "2026-09-24";
+    const entryMorningId = "entry-same-day-morning";
+    const entryAfternoonId = "entry-same-day-afternoon";
+    const entryNightId = "entry-same-day-night";
+
+    // 1. Insert morning entry
+    await session.db.insert(entries).values({
+      id: entryMorningId,
+      date: testDay,
+      title: "Morning Sunrise Run",
+      content: "Ran 5 kilometers at 7am before breakfast. Cold morning breeze along the bay.",
+      createdAt: new Date("2026-09-24T07:00:00Z"),
+      updatedAt: new Date("2026-09-24T07:00:00Z"),
+    });
+
+    // 2. Insert afternoon entry on the SAME day
+    await session.db.insert(entries).values({
+      id: entryAfternoonId,
+      date: testDay,
+      title: "Afternoon Coffee & Sketching",
+      content: "Designed the new journal timeline layout. Drank pour-over Ethiopian beans.",
+      createdAt: new Date("2026-09-24T14:30:00Z"),
+      updatedAt: new Date("2026-09-24T14:30:00Z"),
+    });
+
+    // 3. Insert evening entry on the SAME day
+    await session.db.insert(entries).values({
+      id: entryNightId,
+      date: testDay,
+      title: "Night Stargazing",
+      content: "Clear autumn sky. Mars was visible just above the horizon.",
+      createdAt: new Date("2026-09-24T21:15:00Z"),
+      updatedAt: new Date("2026-09-24T21:15:00Z"),
+    });
+
+    // 4. Query all entries for this date
+    const dayEntries = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.date, testDay))
+      .orderBy(desc(entries.createdAt));
+
+    assert.equal(dayEntries.length, 3, "Must have exactly 3 entries on the same date");
+    assert.equal(dayEntries[0].id, entryNightId, "Night entry (21:15) should be first");
+    assert.equal(dayEntries[1].id, entryAfternoonId, "Afternoon entry (14:30) should be second");
+    assert.equal(dayEntries[2].id, entryMorningId, "Morning entry (07:00) should be third");
+
+    // 5. Update only the afternoon entry and verify isolation
+    await session.db
+      .update(entries)
+      .set({
+        title: "Afternoon Coffee & Drizzle Refactoring",
+        content: "Refactored multi-entry schema constraints and verified offline database durability.",
+        updatedAt: new Date("2026-09-24T15:00:00Z"),
+      })
+      .where(eq(entries.id, entryAfternoonId));
+
+    const morningEntry = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.id, entryMorningId));
+    assert.equal(morningEntry[0].title, "Morning Sunrise Run", "Morning entry should remain unchanged");
+
+    const updatedAfternoon = await session.db
+      .select()
+      .from(entries)
+      .where(eq(entries.id, entryAfternoonId));
+    assert.equal(updatedAfternoon[0].title, "Afternoon Coffee & Drizzle Refactoring");
+
+    // 6. Verify full-text search finds both independent entries on that date
+    const runResults = session.search("breakfast");
+    assert.equal(runResults.length, 1);
+    assert.equal(runResults[0].id, entryMorningId);
+    assert.equal(runResults[0].date, testDay);
+
+    const refactorResults = session.search("Refactoring");
+    assert.equal(refactorResults.length, 1);
+    assert.equal(refactorResults[0].id, entryAfternoonId);
+    assert.equal(refactorResults[0].date, testDay);
 
     session.close();
   });

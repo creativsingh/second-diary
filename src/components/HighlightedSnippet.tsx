@@ -5,7 +5,7 @@ interface HighlightedSnippetProps {
 
 /**
  * Safely renders SQLite FTS5 snippets with highlighted <mark> terms.
- * Avoids dangerouslySetInnerHTML to prevent any injection risks while styling matched keywords.
+ * Avoids dangerouslySetInnerHTML to prevent injection risks while styling matched keywords.
  */
 export function HighlightedSnippet({
   snippet,
@@ -24,7 +24,7 @@ export function HighlightedSnippet({
           return (
             <mark
               key={index}
-              className="bg-emerald-500/25 text-emerald-200 font-semibold rounded px-0.5 border border-emerald-500/30"
+              className="bg-[#f0ece8] text-[#7c6f5b] font-medium rounded px-1 py-0.5 border border-[#ece9e4]"
             >
               {text}
             </mark>

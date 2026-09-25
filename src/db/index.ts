@@ -69,13 +69,31 @@ class BrowserFallbackDb {
 
   async select<T = any>(sql: string, params: unknown[] = []): Promise<T> {
     const list = this.getEntries();
-    if (sql.includes("where") && sql.includes("date")) {
-      const targetDate = String(params[0] ?? "");
-      const match = list.find((e) => e.date === targetDate);
-      return (match ? [match] : []) as unknown as T;
+    const lower = sql.toLowerCase();
+    if (lower.includes("where")) {
+      if (lower.includes("id =") || lower.includes("id=")) {
+        const targetId = String(params[0] ?? "");
+        const match = list.find((e) => e.id === targetId);
+        return (match ? [match] : []) as unknown as T;
+      }
+      if (lower.includes("date =") || lower.includes("date=")) {
+        const targetDate = String(params[0] ?? "");
+        const matches = list.filter((e) => e.date === targetDate);
+        return matches.sort((a, b) => {
+          const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+          const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+          return timeB - timeA;
+        }) as unknown as T;
+      }
     }
-    // Return chronologically descending (newest date first)
-    const sorted = [...list].sort((a, b) => b.date.localeCompare(a.date));
+    // Return chronologically descending (newest date first, then newest createdAt first)
+    const sorted = [...list].sort((a, b) => {
+      const dateCmp = b.date.localeCompare(a.date);
+      if (dateCmp !== 0) return dateCmp;
+      const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
+      const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
+      return timeB - timeA;
+    });
     return sorted as unknown as T;
   }
 
@@ -92,7 +110,7 @@ class BrowserFallbackDb {
         createdAt: new Date((Number(params[4]) || Math.floor(Date.now() / 1000)) * 1000),
         updatedAt: new Date((Number(params[5]) || Math.floor(Date.now() / 1000)) * 1000),
       };
-      const filtered = list.filter((e) => e.id !== newEntry.id && e.date !== newEntry.date);
+      const filtered = list.filter((e) => e.id !== newEntry.id);
       this.saveEntries([...filtered, newEntry]);
       return { rowsAffected: 1, lastInsertId: 1 };
     }
@@ -115,6 +133,14 @@ class BrowserFallbackDb {
         this.saveEntries(updated);
       }
       return { rowsAffected: changed ? 1 : 0, lastInsertId: undefined };
+    }
+
+    if (lower.startsWith("delete")) {
+      const targetId = String(params[0] ?? "");
+      const before = list.length;
+      const filtered = list.filter((e) => e.id !== targetId);
+      this.saveEntries(filtered);
+      return { rowsAffected: before - filtered.length, lastInsertId: undefined };
     }
 
     return { rowsAffected: 0, lastInsertId: undefined };
@@ -191,7 +217,8 @@ export async function getDb(): Promise<ReturnType<typeof drizzle<typeof schema>>
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );`,
-        `CREATE UNIQUE INDEX IF NOT EXISTS entries_date_unique ON entries (date);`,
+        `DROP INDEX IF EXISTS entries_date_unique;`,
+        `CREATE INDEX IF NOT EXISTS entries_date_idx ON entries (date);`,
         `CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
           id UNINDEXED,
           date UNINDEXED,
@@ -360,16 +387,42 @@ export function formatDayOfWeek(dateStr: string): string {
 }
 
 /**
- * Fetches an entry by its date (YYYY-MM-DD) from the local SQLite database.
+ * Fetches the most recent entry for a date (YYYY-MM-DD) from the local SQLite database.
  */
 export async function getEntryByDate(dateStr: string): Promise<Entry | null> {
   const db = await getDb();
   const rows = await db
     .select()
     .from(schema.entries)
-    .where(eq(schema.entries.date, dateStr));
+    .where(eq(schema.entries.date, dateStr))
+    .orderBy(desc(schema.entries.createdAt));
 
   return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Fetches an entry by its ID from the local SQLite database.
+ */
+export async function getEntryById(id: string): Promise<Entry | null> {
+  const db = await getDb();
+  const rows = await db
+    .select()
+    .from(schema.entries)
+    .where(eq(schema.entries.id, id));
+
+  return rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Fetches all entries for a specific date (YYYY-MM-DD), ordered by newest createdAt first.
+ */
+export async function getEntriesByDate(dateStr: string): Promise<Entry[]> {
+  const db = await getDb();
+  return db
+    .select()
+    .from(schema.entries)
+    .where(eq(schema.entries.date, dateStr))
+    .orderBy(desc(schema.entries.createdAt));
 }
 
 /**
@@ -380,10 +433,15 @@ export async function saveEntry(data: {
   date: string;
   title: string;
   content: string;
+  createdAt?: Date;
 }): Promise<Entry> {
   const db = await getDb();
-  const existing = await getEntryByDate(data.date);
   const now = new Date();
+
+  let existing: Entry | null = null;
+  if (data.id) {
+    existing = await getEntryById(data.id);
+  }
 
   if (existing) {
     await db
@@ -403,12 +461,13 @@ export async function saveEntry(data: {
     };
   } else {
     const entryId = data.id || crypto.randomUUID();
+    const entryCreatedAt = data.createdAt || now;
     const newEntry: Entry = {
       id: entryId,
       date: data.date,
       title: data.title,
       content: data.content,
-      createdAt: now,
+      createdAt: entryCreatedAt,
       updatedAt: now,
     };
 
@@ -418,14 +477,32 @@ export async function saveEntry(data: {
 }
 
 /**
- * Fetches all saved entries from the local database, ordered chronologically (newest date first).
+ * Deletes an entry by its ID from the local SQLite database.
+ */
+export async function deleteEntry(id: string): Promise<boolean> {
+  await getDb();
+  if (isTauri() && rawDb) {
+    await rawDb.execute("DELETE FROM entries WHERE id = ?;", [id]);
+    return true;
+  } else if (fallbackDbInstance) {
+    await fallbackDbInstance.execute("DELETE FROM entries WHERE id = ?", [id]);
+    return true;
+  } else if (dbInstance) {
+    await dbInstance.delete(schema.entries).where(eq(schema.entries.id, id));
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Fetches all saved entries from the local database, ordered chronologically (newest date first, then newest createdAt).
  */
 export async function getAllEntries(): Promise<Entry[]> {
   const db = await getDb();
   return db
     .select()
     .from(schema.entries)
-    .orderBy(desc(schema.entries.date));
+    .orderBy(desc(schema.entries.date), desc(schema.entries.createdAt));
 }
 
 /**

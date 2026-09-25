@@ -6,7 +6,7 @@ import {
   getTodayDateString,
   shiftDateString,
 } from "@/db";
-import type { Entry } from "@/types";
+import type { DbEntry } from "@/types";
 
 export type SaveStatus = "idle" | "unsaved" | "saving" | "saved" | "error";
 
@@ -14,14 +14,14 @@ export interface UseDiaryEntryReturn {
   selectedDate: string;
   todayDate: string;
   isToday: boolean;
-  entry: Entry | null;
+  entry: DbEntry | null;
   title: string;
   content: string;
   isLoading: boolean;
   saveStatus: SaveStatus;
   lastSavedAt: Date | null;
   errorMessage: string | null;
-  allEntries: Entry[];
+  allEntries: DbEntry[];
   setTitle: (title: string) => void;
   setContent: (content: string) => void;
   saveNow: () => Promise<void>;
@@ -41,20 +41,20 @@ export function useTodayEntry(initialDate?: string): UseDiaryEntryReturn {
   const [selectedDate, setSelectedDate] = useState<string>(
     () => initialDate || getTodayDateString()
   );
-  const [entry, setEntry] = useState<Entry | null>(null);
+  const [entry, setEntry] = useState<DbEntry | null>(null);
   const [title, setTitleState] = useState<string>("");
   const [content, setContentState] = useState<string>("");
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [allEntries, setAllEntries] = useState<Entry[]>([]);
+  const [allEntries, setAllEntries] = useState<DbEntry[]>([]);
 
   // References to keep latest values across async timeouts and callbacks
   const stateRef = useRef({
     title: "",
     content: "",
-    entry: null as Entry | null,
+    entry: null as DbEntry | null,
     saveStatus: "idle" as SaveStatus,
     selectedDate,
     todayDate,
