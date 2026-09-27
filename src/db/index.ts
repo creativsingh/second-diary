@@ -1,7 +1,7 @@
 import Database from "@tauri-apps/plugin-sql";
 import { drizzle } from "drizzle-orm/sqlite-proxy";
 import { eq, desc } from "drizzle-orm";
-import { isTauri } from "@tauri-apps/api/core";
+import { isTauri, invoke } from "@tauri-apps/api/core";
 import * as schema from "./schema";
 import type { Entry } from "./schema";
 import type { SearchResult } from "@/types";
@@ -442,7 +442,125 @@ export async function getEntriesByDate(dateStr: string): Promise<Entry[]> {
 }
 
 /**
- * Saves (inserts or updates) a diary entry in the local SQLite database via Drizzle ORM.
+ * Automatically synchronizes an entry to a Markdown (.md) file with YAML frontmatter
+ * in ~/Documents/Second Diary/ alongside SQLite persistence.
+ */
+export async function syncMarkdownEntry(entry: {
+  id: string;
+  date: string;
+  title: string;
+  content: string;
+  createdAt: Date | string | number;
+  updatedAt?: Date | string | number;
+}): Promise<string | null> {
+  if (!isTauri()) return null;
+
+  try {
+    const createdDate =
+      entry.createdAt instanceof Date
+        ? entry.createdAt
+        : new Date(entry.createdAt);
+    const updatedDate = entry.updatedAt
+      ? entry.updatedAt instanceof Date
+        ? entry.updatedAt
+        : new Date(entry.updatedAt)
+      : new Date();
+
+    const hours = String(createdDate.getHours()).padStart(2, "0");
+    const minutes = String(createdDate.getMinutes()).padStart(2, "0");
+    const timeStr = `${hours}:${minutes}`;
+
+    const tagMatches = entry.content.match(/#([\w-]+)/g);
+    const tags = tagMatches
+      ? Array.from(new Set(tagMatches.map((t) => t.slice(1))))
+      : [];
+
+    const filePath = await invoke<string>("save_markdown_entry", {
+      id: entry.id,
+      date: entry.date,
+      timeStr,
+      title: entry.title,
+      content: entry.content,
+      tags,
+      createdAt: createdDate.toISOString(),
+      updatedAt: updatedDate.toISOString(),
+    });
+
+    return filePath;
+  } catch (e) {
+    console.warn("[Second Diary] Failed to sync markdown entry:", e);
+    return null;
+  }
+}
+
+/**
+ * Removes the corresponding .md file for an entry from ~/Documents/Second Diary/.
+ */
+export async function deleteMarkdownEntry(id: string): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    return await invoke<boolean>("delete_markdown_entry", { id });
+  } catch (e) {
+    console.warn("[Second Diary] Failed to delete markdown entry:", e);
+    return false;
+  }
+}
+
+/**
+ * Reveals and opens the user's Second Diary markdown folder (~/Documents/Second Diary/) in Finder.
+ */
+export async function openMarkdownFolder(): Promise<string | null> {
+  if (!isTauri()) {
+    console.info(
+      "[Second Diary] Running outside Tauri: Markdown folder is in ~/Documents/Second Diary/"
+    );
+    return null;
+  }
+  try {
+    return await invoke<string>("open_markdown_folder");
+  } catch (e) {
+    console.warn("[Second Diary] Failed to open markdown folder:", e);
+    return null;
+  }
+}
+
+/**
+ * Reveals and highlights the specific .md file for an entry in macOS Finder.
+ */
+export async function revealMarkdownFile(id: string): Promise<string | null> {
+  if (!isTauri()) {
+    console.info(
+      "[Second Diary] Running outside Tauri: Markdown file is in ~/Documents/Second Diary/"
+    );
+    return null;
+  }
+  try {
+    return await invoke<string>("reveal_markdown_file", { id });
+  } catch (e) {
+    console.warn("[Second Diary] Failed to reveal markdown file:", e);
+    return openMarkdownFolder();
+  }
+}
+
+/**
+ * Synchronizes all entries currently stored in SQLite to Markdown files on disk.
+ * Runs on application startup to ensure all existing entries exist in ~/Documents/Second Diary/.
+ */
+export async function syncAllEntriesToMarkdown(): Promise<void> {
+  if (!isTauri()) return;
+  try {
+    const all = await getAllEntries();
+    for (const entry of all) {
+      await syncMarkdownEntry(entry);
+    }
+  } catch (e) {
+    console.warn("[Second Diary] Failed to bulk sync markdown entries:", e);
+  }
+}
+
+/**
+ * Saves (inserts or updates) a diary entry in the local SQLite database via Drizzle ORM
+ * and dual-syncs to a human-readable .md file in ~/Documents/Second Diary/.
  */
 export async function saveEntry(data: {
   id?: string;
@@ -469,12 +587,19 @@ export async function saveEntry(data: {
       })
       .where(eq(schema.entries.id, existing.id));
 
-    return {
+    const updatedEntry: Entry = {
       ...existing,
       title: data.title,
       content: data.content,
       updatedAt: now,
     };
+
+    // Dual-sync to local .md file in ~/Documents/Second Diary/
+    syncMarkdownEntry(updatedEntry).catch((err) =>
+      console.warn("[Second Diary] Dual-sync markdown update error:", err)
+    );
+
+    return updatedEntry;
   } else {
     const entryId = data.id || crypto.randomUUID();
     const entryCreatedAt = data.createdAt || now;
@@ -488,14 +613,25 @@ export async function saveEntry(data: {
     };
 
     await db.insert(schema.entries).values(newEntry);
+
+    // Dual-sync to local .md file in ~/Documents/Second Diary/
+    syncMarkdownEntry(newEntry).catch((err) =>
+      console.warn("[Second Diary] Dual-sync markdown insert error:", err)
+    );
+
     return newEntry;
   }
 }
 
 /**
- * Deletes an entry by its ID from the local SQLite database.
+ * Deletes an entry by its ID from the local SQLite database and removes its .md file.
  */
 export async function deleteEntry(id: string): Promise<boolean> {
+  // Dual-sync: remove corresponding .md file from ~/Documents/Second Diary/
+  deleteMarkdownEntry(id).catch((err) =>
+    console.warn("[Second Diary] Dual-sync markdown delete error:", err)
+  );
+
   await getDb();
   if (isTauri() && rawDb) {
     await rawDb.execute("DELETE FROM entries WHERE id = ?;", [id]);

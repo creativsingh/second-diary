@@ -9,6 +9,7 @@ import type { NavItem } from "@/types";
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(true);
   const [nav, setNav] = useState<NavItem>("journal");
+  const [journalViewMode, setJournalViewMode] = useState<"list" | "calendar">("list");
   const [dictating, setDictating] = useState<boolean>(false);
   const recognitionRef = useRef<any>(null);
 
@@ -30,15 +31,24 @@ export default function App() {
     setSearchQuery,
     searchResults,
     isSearching,
+    openMarkdownFolder,
+    revealMarkdownFile,
   } = useDiary();
+
+  const handleCreateNewEntry = (date?: string) => {
+    setNav("journal");
+    if (!date) {
+      setJournalViewMode("list");
+    }
+    createNewEntry(date || todayDate);
+  };
 
   // Global shortcut: ⌘N / Ctrl+N to trigger main CTA (New Entry)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        setNav("journal");
-        createNewEntry(todayDate);
+        handleCreateNewEntry(todayDate);
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -144,10 +154,7 @@ export default function App() {
         activeTag={activeTag}
         onSelectTag={setActiveTag}
         topTags={topTags}
-        onNewEntry={() => {
-          setNav("journal");
-          createNewEntry(todayDate);
-        }}
+        onOpenFolder={openMarkdownFolder}
       />
 
       {/* COLUMN 2 — Middle Panel (260px) */}
@@ -157,7 +164,7 @@ export default function App() {
           selectedId={selectedId}
           todayDate={todayDate}
           onSelectEntry={setSelectedId}
-          onNewEntry={(date) => createNewEntry(date || todayDate)}
+          onNewEntry={handleCreateNewEntry}
           onSelectDate={(d) => {
             const matching = entries.find((e) => e.date === d);
             if (matching) {
@@ -169,6 +176,8 @@ export default function App() {
           searchResults={searchResults}
           isSearching={isSearching}
           onDeleteEntry={deleteEntry}
+          viewMode={journalViewMode}
+          onViewModeChange={setJournalViewMode}
         />
       ) : (
         <AiPanel
@@ -189,6 +198,9 @@ export default function App() {
             onToggleDictation={toggleDictation}
             saveStatus={saveStatus}
             onDeleteEntry={deleteEntry}
+            onOpenFolder={openMarkdownFolder}
+            onRevealFile={revealMarkdownFile}
+            suggestedTags={topTags}
           />
         ) : (
           <AiChatView

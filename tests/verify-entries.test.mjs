@@ -453,15 +453,6 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
     let selectedId = null;
 
     async function handleMainCta(targetDate = today) {
-      // If there is already an empty, unedited entry for this targetDate, reuse it
-      const existingEmpty = entriesList.find(
-        (e) => e.date === targetDate && !e.title.trim() && !e.body.trim()
-      );
-      if (existingEmpty) {
-        selectedId = existingEmpty.id;
-        return existingEmpty.id;
-      }
-
       const now = new Date();
       const newEntry = {
         id: `cta-entry-${entriesList.length + 1}-${Date.now()}`,
@@ -518,10 +509,10 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
     assert.notEqual(secondId, thirdId);
     assert.equal(entriesList.length, 3, "List must now contain 3 entries for today");
 
-    // 6. User clicks main CTA again WITHOUT typing anything in the 3rd entry
+    // 6. User clicks main CTA a fourth time on the SAME day
     const fourthAttemptId = await handleMainCta(today);
-    assert.equal(fourthAttemptId, thirdId, "Clicking main CTA with an empty entry should reuse it rather than duplicate");
-    assert.equal(entriesList.length, 3, "Length must remain 3");
+    assert.notEqual(thirdId, fourthAttemptId, "Fourth entry must have a distinct unique ID");
+    assert.equal(entriesList.length, 4, "Sequential clicks on main CTA create distinct entries for today");
 
     // 7. Verify all entries are persisted in SQLite under today's date
     const dbEntriesToday = await session.db
@@ -529,7 +520,7 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
       .from(entries)
       .where(eq(entries.date, today));
 
-    assert.equal(dbEntriesToday.length, 3, "Database must store all 3 entries under today's date");
+    assert.equal(dbEntriesToday.length, 4, "Database must store all 4 entries under today's date");
 
     const savedFirst = dbEntriesToday.find((e) => e.id === firstId);
     const savedSecond = dbEntriesToday.find((e) => e.id === secondId);
@@ -619,6 +610,233 @@ test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
     assert.equal(entriesList.length, 1, "Length remains 1; no duplicate entry created");
 
     session.close();
+  });
+
+  // Step 10: Markdown Dual-Sync: .md file formatting, YAML frontmatter, title change cleanup, and deletion
+  await t.test("Markdown Dual-Sync: .md generation with YAML frontmatter, safe filename, rename cleanup, and deletion", async () => {
+    const session = createDrizzleBridge(TEST_DB_PATH);
+    const testMdDir = path.join(process.cwd(), "tests", "test_second_diary_md");
+    if (!fs.existsSync(testMdDir)) {
+      fs.mkdirSync(testMdDir, { recursive: true });
+    }
+
+    // Mirror Rust save_markdown_entry logic
+    function sanitizeFilename(title) {
+      const clean = title.replace(/[^a-zA-Z0-9 _-]/g, "_").trim();
+      const truncated = clean.slice(0, 50).trim();
+      return truncated || "Untitled";
+    }
+
+    function saveMarkdownEntry({ id, date, timeStr, title, content, tags, createdAt, updatedAt }) {
+      // Remove any existing .md file matching this id
+      const files = fs.readdirSync(testMdDir);
+      for (const file of files) {
+        if (file.endsWith(".md")) {
+          const filePath = path.join(testMdDir, file);
+          const text = fs.readFileSync(filePath, "utf-8");
+          if (text.includes(`id: "${id}"`) || text.includes(`id: ${id}`)) {
+            fs.unlinkSync(filePath);
+          }
+        }
+      }
+
+      const cleanTime = timeStr.replace(/:/g, "");
+      const cleanTitle = sanitizeFilename(title);
+      const shortId = id.length >= 8 ? id.slice(0, 8) : id;
+      const filename = `${date}_${cleanTime}_${cleanTitle}_${shortId}.md`;
+      const filePath = path.join(testMdDir, filename);
+
+      const tagsYaml = tags.length === 0 ? "[]" : `[${tags.map((t) => `"${t}"`).join(", ")}]`;
+      const titleDisplay = title.trim() || "Untitled Entry";
+
+      const mdContent = `---
+id: "${id}"
+date: "${date}"
+time: "${timeStr}"
+title: "${title.replace(/"/g, '\\"')}"
+tags: ${tagsYaml}
+createdAt: "${createdAt}"
+updatedAt: "${updatedAt}"
+---
+
+# ${titleDisplay}
+
+${content}
+`;
+      fs.writeFileSync(filePath, mdContent, "utf-8");
+      return filePath;
+    }
+
+    function deleteMarkdownEntry(id) {
+      const files = fs.readdirSync(testMdDir);
+      let deleted = false;
+      for (const file of files) {
+        if (file.endsWith(".md")) {
+          const filePath = path.join(testMdDir, file);
+          const text = fs.readFileSync(filePath, "utf-8");
+          if (text.includes(`id: "${id}"`) || text.includes(`id: ${id}`)) {
+            fs.unlinkSync(filePath);
+            deleted = true;
+          }
+        }
+      }
+      return deleted;
+    }
+
+    // 1. Create entry in SQLite & dual-sync to .md file
+    const entryId = "md-entry-test-1";
+    const date = "2026-09-26";
+    const timeStr = "14:30";
+    const title = "Hiking in Redwood Regional Park";
+    const content = "The redwood canopy provided complete shade. Observed red-tailed hawks.\n\n#nature #hiking";
+    const createdAt = "2026-09-26T14:30:00.000Z";
+    const updatedAt = "2026-09-26T14:30:00.000Z";
+
+    await session.db.insert(entries).values({
+      id: entryId,
+      date,
+      title,
+      content,
+      createdAt: new Date(createdAt),
+      updatedAt: new Date(updatedAt),
+    });
+
+    const savedFilePath = saveMarkdownEntry({
+      id: entryId,
+      date,
+      timeStr,
+      title,
+      content,
+      tags: ["nature", "hiking"],
+      createdAt,
+      updatedAt,
+    });
+
+    // Verify .md file exists on disk
+    assert.ok(fs.existsSync(savedFilePath), "Markdown file must exist on disk");
+    const filename = path.basename(savedFilePath);
+    assert.ok(filename.startsWith("2026-09-26_1430_Hiking in Redwood Regional Park_md-entry"));
+    assert.ok(filename.endsWith(".md"));
+
+    // Verify YAML frontmatter & body structure
+    const fileText = fs.readFileSync(savedFilePath, "utf-8");
+    assert.ok(fileText.includes('id: "md-entry-test-1"'));
+    assert.ok(fileText.includes('date: "2026-09-26"'));
+    assert.ok(fileText.includes('time: "14:30"'));
+    assert.ok(fileText.includes('title: "Hiking in Redwood Regional Park"'));
+    assert.ok(fileText.includes('tags: ["nature", "hiking"]'));
+    assert.ok(fileText.includes("# Hiking in Redwood Regional Park"));
+    assert.ok(fileText.includes("The redwood canopy provided complete shade."));
+
+    // 2. Update entry with a new title (rename)
+    const newTitle = "Hiking in Redwood Regional Park (West Ridge Trail)";
+    const newUpdatedAt = "2026-09-26T16:00:00.000Z";
+
+    await session.db
+      .update(entries)
+      .set({
+        title: newTitle,
+        updatedAt: new Date(newUpdatedAt),
+      })
+      .where(eq(entries.id, entryId));
+
+    const updatedFilePath = saveMarkdownEntry({
+      id: entryId,
+      date,
+      timeStr,
+      title: newTitle,
+      content,
+      tags: ["nature", "hiking"],
+      createdAt,
+      updatedAt: newUpdatedAt,
+    });
+
+    // Verify old file was cleanly removed and new file created (no orphans)
+    assert.ok(!fs.existsSync(savedFilePath), "Old markdown file must be deleted upon title rename");
+    assert.ok(fs.existsSync(updatedFilePath), "New markdown file with updated title must exist");
+    const updatedFiles = fs.readdirSync(testMdDir).filter((f) => f.endsWith(".md"));
+    assert.equal(updatedFiles.length, 1, "Only 1 .md file should exist for this entry");
+
+    // 3. Delete entry and verify .md file is removed
+    await session.db.delete(entries).where(eq(entries.id, entryId));
+    const wasDeleted = deleteMarkdownEntry(entryId);
+    assert.equal(wasDeleted, true, "deleteMarkdownEntry should report success");
+
+    const remainingFiles = fs.readdirSync(testMdDir).filter((f) => f.endsWith(".md"));
+    assert.equal(remainingFiles.length, 0, "Markdown file must be removed when entry is deleted");
+
+    // Clean up test markdown directory
+    fs.rmSync(testMdDir, { recursive: true, force: true });
+    session.close();
+  });
+
+  // Step 11: Multi-Tag Management: Batch adding tags, comma/space tokenization, and body syncing
+  await t.test("Multi-Tag Management: Batch tag addition, comma/space tokenization, and body syncing", async () => {
+    function cleanTag(text) {
+      return text
+        .trim()
+        .replace(/^#+/, "")
+        .replace(/[^\w-]/g, "-")
+        .replace(/-+/g, "-")
+        .toLowerCase();
+    }
+
+    function tokenizeTags(rawInput) {
+      return rawInput
+        .split(/[, \n\t]+/)
+        .map(cleanTag)
+        .filter((t) => t.length > 0);
+    }
+
+    function syncTagsToBody(body, newTags) {
+      const existingTags = Array.from(
+        new Set((body.match(/#([\w-]+)/g) || []).map((t) => t.slice(1)))
+      );
+      let updated = body;
+      for (const oldTag of existingTags) {
+        if (!newTags.includes(oldTag)) {
+          const re = new RegExp(`(?:\\s*)#${oldTag}\\b`, "g");
+          updated = updated.replace(re, "");
+        }
+      }
+      const remainingTags = Array.from(
+        new Set((updated.match(/#([\w-]+)/g) || []).map((t) => t.slice(1)))
+      );
+      const tagsToAdd = newTags.filter((t) => !remainingTags.includes(t));
+      if (tagsToAdd.length > 0) {
+        const tagString = tagsToAdd.map((t) => `#${t}`).join(" ");
+        const trimmed = updated.trimEnd();
+        updated = trimmed ? `${trimmed} ${tagString}` : tagString;
+      }
+      return updated;
+    }
+
+    function parseTags(text) {
+      const match = text.match(/#([\w-]+)/g);
+      return match ? Array.from(new Set(match.map((t) => t.slice(1)))) : [];
+    }
+
+    // 1. Test tokenizing multiple tags in one go
+    const rawTokens = "morning, coffee, deep-work ideas,   reflection";
+    const tokens = tokenizeTags(rawTokens);
+    assert.deepEqual(tokens, ["morning", "coffee", "deep-work", "ideas", "reflection"]);
+
+    // 2. Add multiple tags to an entry body
+    const initialBody = "Wrote three paragraphs before breakfast.";
+    const bodyWithTags = syncTagsToBody(initialBody, tokens);
+    assert.equal(
+      bodyWithTags,
+      "Wrote three paragraphs before breakfast. #morning #coffee #deep-work #ideas #reflection"
+    );
+    assert.deepEqual(parseTags(bodyWithTags), ["morning", "coffee", "deep-work", "ideas", "reflection"]);
+
+    // 3. Remove a tag and add another
+    const updatedTags = ["morning", "deep-work", "creative", "reflection"];
+    const modifiedBody = syncTagsToBody(bodyWithTags, updatedTags);
+    assert.deepEqual(parseTags(modifiedBody), ["morning", "deep-work", "reflection", "creative"]);
+    assert.ok(!modifiedBody.includes("#coffee"), "Removed tag #coffee should no longer be in body");
+    assert.ok(!modifiedBody.includes("#ideas"), "Removed tag #ideas should no longer be in body");
+    assert.ok(modifiedBody.includes("#creative"), "Newly added tag #creative should be present");
   });
 
   // Cleanup

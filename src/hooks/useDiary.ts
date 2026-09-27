@@ -5,6 +5,9 @@ import {
   deleteEntry,
   searchEntries,
   getTodayDateString,
+  openMarkdownFolder,
+  revealMarkdownFile,
+  syncAllEntriesToMarkdown,
 } from "@/db";
 import type { Entry, SearchResult, DbEntry } from "@/types";
 
@@ -167,6 +170,11 @@ export function useDiary() {
             const todayMatch = list.find((e) => e.date === todayDate);
             setSelectedId(todayMatch ? todayMatch.id : list[0]?.id ?? null);
           }
+
+          // Ensure all existing entries are synced to .md files in ~/Documents/Second Diary/
+          syncAllEntriesToMarkdown().catch((e) =>
+            console.warn("[useDiary] Initial markdown sync warning:", e)
+          );
         }
       } catch (err) {
         console.error("[useDiary] Failed to load entries:", err);
@@ -250,15 +258,6 @@ export function useDiary() {
           setSelectedId(existing.id);
           return existing.id;
         }
-      }
-
-      // If there is already an empty, unedited entry for this targetDate, select that one rather than creating a duplicate blank
-      const existingEmpty = entries.find(
-        (e) => e.date === targetDate && !e.title.trim() && !e.body.trim()
-      );
-      if (existingEmpty) {
-        setSelectedId(existingEmpty.id);
-        return existingEmpty.id;
       }
 
       // Flush pending save for outgoing entry if needed
@@ -399,6 +398,8 @@ export function useDiary() {
         console.warn(`[useDiary] Cannot create entry for future date: ${targetDate}`);
         return Promise.resolve(null);
       }
+      setActiveTag(null);
+      setSearchQuery("");
       return createEntryForDate(targetDate, true);
     },
     deleteEntry: deleteEntryById,
@@ -406,5 +407,7 @@ export function useDiary() {
     setSearchQuery,
     searchResults,
     isSearching,
+    openMarkdownFolder,
+    revealMarkdownFile,
   };
 }

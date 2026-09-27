@@ -53,3 +53,14 @@ textarea, input {
   border: none;
   resize: none;
 }
+
+@media print {
+  @page {
+    margin: 20mm 15mm;
+    size: auto;
+  }
+  body {
+    background: #ffffff !important;
+    color: #1a1a1a !important;
+  }
+}

@@ -10,7 +10,7 @@ interface SidebarProps {
   activeTag: string | null;
   onSelectTag: (tag: string) => void;
   topTags: string[];
-  onNewEntry?: () => void;
+  onOpenFolder?: () => void;
 }
 
 export function Sidebar({
@@ -21,7 +21,7 @@ export function Sidebar({
   activeTag,
   onSelectTag,
   topTags,
-  onNewEntry,
+  onOpenFolder,
 }: SidebarProps) {
   return (
     <nav
@@ -29,7 +29,7 @@ export function Sidebar({
         width: sidebarOpen ? 200 : 52,
         transition: "width 0.22s ease",
       }}
-      className="h-full bg-[#f7f5f2] border-r border-[#ece9e4] flex flex-col justify-between py-5 shrink-0 overflow-hidden select-none"
+      className="h-full bg-[#f7f5f2] border-r border-[#ece9e4] flex flex-col justify-between py-5 shrink-0 overflow-hidden select-none print:hidden"
     >
       <div className="px-3">
         {/* Logo / collapse toggle */}
@@ -56,25 +56,6 @@ export function Sidebar({
             </span>
           )}
         </button>
-
-        {/* Main CTA: New Entry */}
-        {onNewEntry && (
-          <button
-            type="button"
-            onClick={onNewEntry}
-            className={`w-full mb-4 flex items-center gap-2 rounded-lg bg-[#1c1a18] text-white hover:bg-[#3a3530] transition-all cursor-pointer shadow-xs ${
-              sidebarOpen
-                ? "px-3 py-2 text-[12px] font-medium justify-start"
-                : "p-2 justify-center"
-            }`}
-            title="New Entry (⌘N)"
-          >
-            <span className="shrink-0 flex items-center justify-center">
-              <Ic.plus />
-            </span>
-            {sidebarOpen && <span className="whitespace-nowrap">New Entry</span>}
-          </button>
-        )}
 
         {/* Navigation Items */}
         <div className="space-y-1">
@@ -153,19 +134,32 @@ export function Sidebar({
       </div>
 
       {/* User profile block */}
-      <div className="border-t border-[#ece9e4] px-3 pt-3 flex items-center gap-2.5">
-        <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-[#d4c8b8] to-[#a89880] flex items-center justify-center text-white text-[11px] font-medium shrink-0 shadow-xs">
-          Y
-        </div>
-        {sidebarOpen && (
-          <div className="overflow-hidden leading-tight text-left">
-            <div className="text-[11px] font-medium text-[#4a4540] truncate">
-              You
-            </div>
-            <div className="text-[10px] text-[#b5afa7] truncate">
-              Private · Local
-            </div>
+      <div className="border-t border-[#ece9e4] px-3 pt-3 flex items-center justify-between">
+        <div className="flex items-center gap-2.5 overflow-hidden">
+          <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-[#d4c8b8] to-[#a89880] flex items-center justify-center text-white text-[11px] font-medium shrink-0 shadow-xs">
+            Y
           </div>
+          {sidebarOpen && (
+            <div className="overflow-hidden leading-tight text-left">
+              <div className="text-[11px] font-medium text-[#4a4540] truncate">
+                You
+              </div>
+              <div className="text-[10px] text-[#b5afa7] truncate">
+                Private · Local
+              </div>
+            </div>
+          )}
+        </div>
+        {sidebarOpen && onOpenFolder && (
+          <button
+            type="button"
+            onClick={onOpenFolder}
+            className="text-[#8c867e] hover:text-[#1c1a18] p-1.5 rounded-md hover:bg-white/80 transition-colors cursor-pointer shrink-0"
+            title="Open Markdown folder in Finder (~/Documents/Second Diary)"
+            aria-label="Open Markdown folder in Finder"
+          >
+            <Ic.folder />
+          </button>
         )}
       </div>
     </nav>

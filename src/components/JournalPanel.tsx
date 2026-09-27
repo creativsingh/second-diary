@@ -16,6 +16,8 @@ interface JournalPanelProps {
   searchResults: SearchResult[];
   isSearching: boolean;
   onDeleteEntry?: (id: string) => void;
+  viewMode?: "list" | "calendar";
+  onViewModeChange?: (mode: "list" | "calendar") => void;
 }
 
 function formatRelativeDate(dateStr: string, today: string): string {
@@ -56,8 +58,20 @@ export function JournalPanel({
   onSearchChange,
   searchResults,
   isSearching,
+  viewMode: controlledViewMode,
+  onViewModeChange,
 }: JournalPanelProps) {
-  const [viewMode, setViewMode] = useState<"list" | "calendar">("list");
+  const [internalViewMode, setInternalViewMode] = useState<"list" | "calendar">("list");
+  const viewMode = controlledViewMode ?? internalViewMode;
+
+  const handleSetViewMode = (mode: "list" | "calendar" | ((prev: "list" | "calendar") => "list" | "calendar")) => {
+    const nextMode = typeof mode === "function" ? mode(viewMode) : mode;
+    if (onViewModeChange) {
+      onViewModeChange(nextMode);
+    } else {
+      setInternalViewMode(nextMode);
+    }
+  };
 
   // Group entries by date for list view (newest date first)
   const groupedEntries = useMemo(() => {
@@ -83,7 +97,7 @@ export function JournalPanel({
   }, [entries]);
 
   return (
-    <div className="w-[260px] h-full bg-white border-r border-[#ece9e4] flex flex-col shrink-0 select-none">
+    <div className="w-[260px] h-full bg-white border-r border-[#ece9e4] flex flex-col shrink-0 select-none print:hidden">
       {/* Header */}
       <div className="px-4 pt-5 pb-3">
         <div className="flex items-center justify-between mb-3">
@@ -94,7 +108,7 @@ export function JournalPanel({
             <button
               type="button"
               onClick={() =>
-                setViewMode((m) => (m === "list" ? "calendar" : "list"))
+                handleSetViewMode((m) => (m === "list" ? "calendar" : "list"))
               }
               className="w-6 h-6 rounded flex items-center justify-center text-[#9c9690] hover:bg-[#f0ece8] transition-colors cursor-pointer"
               title={
@@ -107,7 +121,10 @@ export function JournalPanel({
             </button>
             <button
               type="button"
-              onClick={() => onNewEntry()}
+              onClick={() => {
+                handleSetViewMode("list");
+                onNewEntry();
+              }}
               className="w-6 h-6 rounded-md bg-[#1c1a18] text-white flex items-center justify-center hover:bg-[#3a3530] transition-colors cursor-pointer shadow-xs"
               title="New Entry for Today"
             >
@@ -198,8 +215,24 @@ export function JournalPanel({
         ) : (
           /* Standard grouped list view */
           <div className="divide-y divide-[#f0ece8]">
-            {groupedEntries.map((group) => (
-              <div key={group.date}>
+            {groupedEntries.length === 0 ? (
+              <div className="py-12 px-4 text-center">
+                <p className="text-[12px] text-[#b5afa7] mb-3">No entries yet</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleSetViewMode("list");
+                    onNewEntry();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#1c1a18] text-white text-[11px] font-medium hover:bg-[#3a3530] transition-colors cursor-pointer shadow-xs"
+                >
+                  <Ic.plus />
+                  <span>Create your first entry</span>
+                </button>
+              </div>
+            ) : (
+              groupedEntries.map((group) => (
+                <div key={group.date}>
                 {/* Date header */}
                 <div className="px-4 py-1.5 bg-[#faf9f7] border-b border-[#f0ece8] text-[10px] font-semibold text-[#b5afa7] uppercase tracking-wide flex items-center justify-between group/header">
                   <span>{formatRelativeDate(group.date, todayDate)}</span>
@@ -270,7 +303,7 @@ export function JournalPanel({
                   );
                 })}
               </div>
-            ))}
+            )))}
           </div>
         )}
       </div>
