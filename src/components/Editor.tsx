@@ -2,13 +2,15 @@ import { useRef, useEffect, useState } from "react";
 import { Ic } from "@/components/Icons";
 import { AddTagModal } from "@/components/AddTagModal";
 import { DeleteModal } from "@/components/DeleteModal";
+import { FloatingDictateModal } from "@/components/FloatingDictateModal";
 import type { Entry } from "@/types";
 
 interface EditorProps {
   entry: Entry | null;
   onUpdateEntry: (field: "title" | "body", value: string) => void;
-  dictating: boolean;
-  onToggleDictation: () => void;
+  dictating?: boolean;
+  onToggleDictation?: () => void;
+  onStartDictateInline?: () => void;
   saveStatus?: "idle" | "unsaved" | "saving" | "saved" | "error";
   onDeleteEntry?: (id: string) => void;
   onOpenFolder?: () => void;
@@ -53,7 +55,6 @@ export function syncTagsToBody(body: string, newTags: string[]): string {
 
   let updated = body;
 
-  // Remove tags that are not in newTags
   for (const oldTag of existingTags) {
     if (!newTags.includes(oldTag)) {
       const re = new RegExp(`(?:\\s*)#${oldTag}\\b`, "g");
@@ -61,7 +62,6 @@ export function syncTagsToBody(body: string, newTags: string[]): string {
     }
   }
 
-  // Add tags from newTags that are not present
   const remainingTags = Array.from(
     new Set((updated.match(/#([\w-]+)/g) || []).map((t) => t.slice(1)))
   );
@@ -81,6 +81,7 @@ export function Editor({
   onUpdateEntry,
   dictating,
   onToggleDictation,
+  onStartDictateInline,
   saveStatus = "saved",
   onDeleteEntry,
   onOpenFolder,
@@ -94,6 +95,12 @@ export function Editor({
   const [menuOpen, setMenuOpen] = useState(false);
   const [tagModalOpen, setTagModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [viewSubMode, setViewSubMode] = useState<"diary" | "conversation" | "raw">("diary");
+
+  // Reset sub-view on entry switch
+  useEffect(() => {
+    setViewSubMode("diary");
+  }, [entry?.id]);
 
   // Close menu on click outside or Escape key
   useEffect(() => {
@@ -141,7 +148,7 @@ export function Editor({
     }
   }, [entry?.title]);
 
-  // Focus title when a newly created or empty entry is selected
+  // Focus title when newly created or empty entry selected
   useEffect(() => {
     if (entry && !entry.title && !entry.body && titleRef.current) {
       titleRef.current.focus();
@@ -158,8 +165,17 @@ export function Editor({
 
   const wordCount = getWordCount(entry.body);
 
+  const handleAppendFromFloatingDictate = (text: string) => {
+    const current = entry.body || "";
+    const updated = current.trim() ? `${current}\n\n${text}` : text;
+    onUpdateEntry("body", updated);
+  };
+
+  const isDictationOrigin = entry.origin === "dictation";
+  const isConversationOrigin = entry.origin === "conversation";
+
   return (
-    <div className="flex flex-1 flex-col h-full overflow-hidden bg-[#fdfcfb]">
+    <div className="flex flex-1 flex-col h-full overflow-hidden bg-[#fdfcfb] relative">
       {/* Print-Only Formatted Document for PDF Export */}
       <div className="hidden print:block print:w-full print:max-w-2xl print:mx-auto print:py-8 font-serif">
         <div className="text-[12px] text-[#8c867e] mb-3 uppercase tracking-wider font-sans">
@@ -168,43 +184,76 @@ export function Editor({
         <h1 className="text-[28px] font-bold text-[#1c1a18] mb-4 leading-tight">
           {entry.title.trim() || "Untitled Entry"}
         </h1>
-        {entry.tags.length > 0 && (
-          <div className="flex gap-2 mb-6 text-[11px] text-[#7c6f5b] font-sans">
-            {entry.tags.map((t) => (
-              <span key={t}>#{t}</span>
-            ))}
-          </div>
-        )}
         <div className="text-[15px] text-[#2c2825] leading-[1.8] whitespace-pre-wrap">
           {entry.body}
         </div>
       </div>
 
-      {/* Top Toolbar */}
-      <div className="px-10 py-3 border-b border-[#ece9e4] flex items-center justify-between shrink-0 select-none print:hidden">
+      {/* Top Toolbar (Toolbar: date label on left, Raw/Diary toggle on right for dictation-origin entries) */}
+      <div className="px-10 py-3 border-b border-[#ece9e4] flex items-center justify-between shrink-0 select-none print:hidden bg-white/50 backdrop-blur-xs">
         <div className="flex items-center gap-2">
-          <span className="text-[11px] font-medium text-[#4a4540]">
+          <span className="text-[12px] font-medium text-[#4a4540]">
             {formatFullDate(entry.date)}
           </span>
           <span className="text-[11px] text-[#c0bbb4]">·</span>
           <span className="text-[11px] text-[#9c9690]">
             {formatTime(entry.hour)}
           </span>
+          {entry.origin && (
+            <span className="ml-2 text-[10px] text-[#7c6f5b] bg-[#f0ece8] px-2 py-0.5 rounded-full capitalize">
+              {entry.origin}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {entry.tags.map((tag) => (
+
+        <div className="flex items-center gap-3">
+          {/* Dictation-Origin entries: Raw / Diary toggle */}
+          {isDictationOrigin && (
+            <div className="flex items-center bg-[#f7f5f2] rounded-lg p-0.5 border border-[#ece9e4]">
               <button
-                key={tag}
                 type="button"
-                onClick={() => setTagModalOpen(true)}
-                className="text-[11px] bg-[#f0ece8] text-[#9c9690] hover:text-[#7c6f5b] hover:bg-[#e8e3dd] px-2.5 py-1 rounded-full font-medium transition-colors cursor-pointer"
-                title="Click to edit tags"
+                onClick={() => setViewSubMode("diary")}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium capitalize transition-all cursor-pointer ${
+                  viewSubMode === "diary"
+                    ? "bg-white text-[#1c1a18] shadow-xs"
+                    : "text-[#9c9690] hover:text-[#1c1a18]"
+                }`}
               >
-                #{tag}
+                diary
               </button>
-            ))}
-          </div>
+              <button
+                type="button"
+                onClick={() => setViewSubMode("raw")}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium capitalize transition-all cursor-pointer ${
+                  viewSubMode === "raw"
+                    ? "bg-white text-[#1c1a18] shadow-xs"
+                    : "text-[#9c9690] hover:text-[#1c1a18]"
+                }`}
+              >
+                raw
+              </button>
+            </div>
+          )}
+
+          {/* Conversation-Origin entries: Diary / Conversation / Raw toggle */}
+          {isConversationOrigin && (
+            <div className="flex items-center bg-[#f7f5f2] rounded-lg p-0.5 border border-[#ece9e4]">
+              {(["diary", "conversation", "raw"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => setViewSubMode(mode)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium capitalize transition-all cursor-pointer ${
+                    viewSubMode === mode
+                      ? "bg-white text-[#1c1a18] shadow-xs"
+                      : "text-[#9c9690] hover:text-[#1c1a18]"
+                  }`}
+                >
+                  {mode}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Entry Options Menu Dropdown */}
           <div className="relative" ref={menuRef}>
@@ -225,7 +274,6 @@ export function Editor({
 
             {menuOpen && (
               <div className="absolute right-0 top-full mt-1.5 w-48 bg-white rounded-xl shadow-[0_4px_20px_rgba(0,0,0,0.08)] border border-[#ece9e4] p-1.5 z-50 text-[12px] animate-in fade-in zoom-in-95 duration-100">
-                {/* 1. Add Tag (Opens multi-tag modal) */}
                 <button
                   type="button"
                   onClick={() => {
@@ -240,7 +288,6 @@ export function Editor({
                   <span>Add Tags…</span>
                 </button>
 
-                {/* 2. Export to PDF */}
                 <button
                   type="button"
                   onClick={handleExportPdf}
@@ -252,7 +299,6 @@ export function Editor({
                   <span>Export to PDF</span>
                 </button>
 
-                {/* 3. View in Finder */}
                 <button
                   type="button"
                   onClick={handleViewInFinder}
@@ -264,12 +310,9 @@ export function Editor({
                   <span>View in Finder</span>
                 </button>
 
-                {/* Divider before destructive action */}
                 {onDeleteEntry && (
                   <>
                     <div className="my-1 border-t border-[#ece9e4]" />
-
-                    {/* 4. Delete Entry (Opens delete confirmation modal) */}
                     <button
                       type="button"
                       onClick={() => {
@@ -291,42 +334,88 @@ export function Editor({
         </div>
       </div>
 
-      {/* Editor Area */}
-      <div className="flex-1 overflow-y-auto px-12 pt-10 pb-8 max-w-3xl mx-auto w-full print:hidden">
-        {/* Title Textarea */}
-        <textarea
-          ref={titleRef}
-          rows={1}
-          value={entry.title}
-          onChange={(e) => onUpdateEntry("title", e.target.value)}
-          placeholder="Title…"
-          className="w-full text-[32px] font-semibold text-[#1c1a18] placeholder:text-[#e0dbd4] leading-tight mb-6 font-serif block outline-none border-none bg-transparent resize-none"
-        />
-
-        {/* Body Textarea */}
-        <div className="relative">
-          <textarea
-            ref={bodyRef}
-            value={entry.body}
-            onChange={(e) => onUpdateEntry("body", e.target.value)}
-            onKeyDown={(e) => {
-              if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
-                e.preventDefault();
-                onToggleDictation();
-              }
-            }}
-            placeholder="Write your thoughts or press ⌘R to dictate…"
-            className="w-full text-[15px] text-[#4a4540] placeholder:text-[#d8d3cc] leading-[1.8] min-h-[50vh] outline-none border-none bg-transparent resize-none block"
-          />
-
-          {/* Dictation Listening Indicator */}
-          {dictating && (
-            <div className="absolute top-1 right-0 flex items-center gap-1.5 text-[11px] text-red-500 animate-pulse pointer-events-none bg-red-50 px-2 py-0.5 rounded-full border border-red-200">
-              <Ic.mic />
-              <span>Listening…</span>
+      {/* Editor Content Area */}
+      <div className="flex-1 overflow-y-auto px-12 pt-10 pb-16 max-w-3xl mx-auto w-full print:hidden">
+        {viewSubMode === "conversation" && entry.conversation && entry.conversation.length > 0 ? (
+          /* Conversation Thread View */
+          <div className="space-y-6 max-w-lg mx-auto py-4">
+            <div className="text-[12px] font-semibold text-[#8c867e] uppercase tracking-wider mb-4 pb-2 border-b border-[#ece9e4]">
+              Recorded Conversation Transcript
             </div>
-          )}
-        </div>
+            {entry.conversation.map((msg, i) => (
+              <div key={i} className="space-y-1.5">
+                {msg.role === "ai" ? (
+                  <>
+                    <div className="text-[10px] uppercase font-semibold text-[#7c6f5b] tracking-wider">
+                      PRIVATE DIARY
+                    </div>
+                    <div className="font-serif text-[16px] text-[#1c1a18] leading-[1.7]">
+                      &ldquo;{msg.text}&rdquo;
+                    </div>
+                  </>
+                ) : (
+                  <div className="pl-4 border-l-2 border-[#ece9e4] text-[15px] font-sans text-[#4a4540] leading-[1.7] my-3">
+                    {msg.text}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : viewSubMode === "raw" ? (
+          /* Raw Verbatim Transcript View */
+          <div className="space-y-4 max-w-2xl mx-auto py-4">
+            <div className="flex items-center justify-between pb-2 border-b border-[#ece9e4]">
+              <span className="text-[12px] font-semibold text-[#8c867e] uppercase tracking-wider">
+                Verbatim Transcript
+              </span>
+              <span className="text-[11px] text-[#b5afa7]">Raw audio text</span>
+            </div>
+            <div className="bg-[#faf9f7] rounded-xl p-5 border border-[#ece9e4] font-mono text-[13px] text-[#4a4540] leading-relaxed whitespace-pre-wrap">
+              {entry.rawTranscript || entry.body}
+            </div>
+          </div>
+        ) : (
+          /* Standard Write View */
+          <div>
+            {/* Title: Lora serif, 26px, medium weight, placeholder "Untitled" */}
+            <textarea
+              ref={titleRef}
+              rows={1}
+              value={entry.title}
+              onChange={(e) => onUpdateEntry("title", e.target.value)}
+              placeholder="Untitled"
+              className="w-full text-[26px] font-medium text-[#1c1a18] placeholder:text-[#d8d3cc] leading-tight mb-4 font-serif block outline-none border-none bg-transparent resize-none"
+            />
+
+            {/* Body: Inter, 16px, line-height 1.9, placeholder "Write your thoughts or press ⌘R to dictate" */}
+            <div className="relative">
+              <textarea
+                ref={bodyRef}
+                value={entry.body}
+                onChange={(e) => onUpdateEntry("body", e.target.value)}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "r") {
+                    e.preventDefault();
+                    if (onStartDictateInline) {
+                      onStartDictateInline();
+                    } else if (onToggleDictation) {
+                      onToggleDictation();
+                    }
+                  }
+                }}
+                placeholder="Write your thoughts or press ⌘R to dictate"
+                className="w-full text-[16px] text-[#4a4540] placeholder:text-[#c0bbb4] leading-[1.9] min-h-[50vh] outline-none border-none bg-transparent resize-none block font-sans"
+              />
+
+              {dictating && (
+                <div className="absolute top-1 right-0 flex items-center gap-1.5 text-[11px] text-red-500 animate-pulse pointer-events-none bg-red-50 px-2 py-0.5 rounded-full border border-red-200">
+                  <Ic.mic />
+                  <span>Listening…</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Status Bar */}
@@ -345,6 +434,9 @@ export function Editor({
           </span>
         </div>
       </div>
+
+      {/* Floating Dictate Button on Write Editor Canvas (bottom-right: 40px, 32px) */}
+      <FloatingDictateModal onAppendToBody={handleAppendFromFloatingDictate} />
 
       {/* Add & Manage Tags Modal */}
       {entry && (
@@ -373,3 +465,4 @@ export function Editor({
     </div>
   );
 }
+

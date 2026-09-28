@@ -11,20 +11,31 @@ interface AiPanelProps {
 
 export function AiPanel({ onSelectPrompt }: AiPanelProps) {
   const PRESET_PROMPTS = [
-    "What recurring themes appear in my writing?",
-    "When did I feel most energized recently?",
-    "Summarize my thoughts on nature and walks",
+    "What recurring themes appear across my diary and notes?",
+    "Summarize my thoughts on architecture, pedagogy & tools",
+    "When did I feel most energized or focused recently?",
+    "What have I written about quiet mornings and focus?",
   ];
 
   return (
-    <div className="w-[260px] h-full bg-white border-r border-[#ece9e4] flex flex-col shrink-0 px-4 pt-5 pb-3 select-none">
+    <div className="w-[260px] h-full bg-[#fdfcfb] border-r border-[#ece9e4] flex flex-col shrink-0 px-4 pt-5 pb-3 select-none">
       <div className="mb-4">
-        <h2 className="text-[13px] font-semibold text-[#1c1a18]">
-          Ask your diary
-        </h2>
-        <p className="text-[11px] text-[#b5afa7] mt-0.5">
-          Search memories with AI
+        <div className="flex items-center gap-1.5 mb-1">
+          <span className="text-[#4a9e87]">
+            <Ic.brain />
+          </span>
+          <h2 className="font-serif text-[15px] font-medium text-[#1c1a18]">
+            Second Brain
+          </h2>
+        </div>
+        <p className="text-[11px] text-[#7c6f5b] leading-relaxed">
+          Ask anything from your diary (memory) or your notes.
         </p>
+      </div>
+
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#e8f4f0] text-[#4a9e87] text-[10px] font-medium mb-4">
+        <span className="w-1.5 h-1.5 rounded-full bg-[#4a9e87] animate-pulse" />
+        <span>Synthesizing Diary & Notes</span>
       </div>
 
       <div className="text-[11px] text-[#b5afa7] mb-2 font-medium">
@@ -66,16 +77,19 @@ export function AiChatView({
     <div className="flex flex-1 flex-col h-full overflow-hidden bg-[#fdfcfb]">
       {history.length === 0 ? (
         /* Empty State */
-        <div className="flex flex-1 flex-col items-center justify-center p-8 text-center max-w-sm mx-auto select-none">
-          <div className="w-12 h-12 rounded-2xl bg-[#e8f4f0] flex items-center justify-center text-[#4a9e87] mb-4 shadow-sm">
-            <Ic.sparkle />
+        <div className="flex flex-1 flex-col items-center justify-center p-8 text-center max-w-md mx-auto select-none">
+          <div className="w-12 h-12 rounded-2xl bg-[#e8f4f0] flex items-center justify-center text-[#4a9e87] mb-4 shadow-xs">
+            <Ic.brain />
           </div>
-          <h2 className="text-[18px] font-semibold text-[#1c1a18] font-serif mb-1.5">
-            Ask your diary anything
+          <h2 className="text-[20px] font-medium text-[#1c1a18] font-serif mb-1.5">
+            Second Brain
           </h2>
-          <p className="text-[13px] text-[#b5afa7] leading-relaxed">
-            Discover patterns, retrieve forgotten thoughts, and explore personal
-            reflections.
+          <p className="text-[14px] font-serif italic text-[#7c6f5b] mb-3">
+            Ask anything from your diary (memory) or your notes
+          </p>
+          <p className="text-[12px] text-[#9c9690] leading-relaxed">
+            Discover recurring patterns, retrieve ideas from past entries, and connect
+            personal reflections with your working notes.
           </p>
         </div>
       ) : (
@@ -93,7 +107,7 @@ export function AiChatView({
               {/* AI response */}
               <div className="flex items-start gap-2.5">
                 <div className="w-7 h-7 rounded-lg bg-[#e8f4f0] text-[#4a9e87] flex items-center justify-center shrink-0 mt-0.5">
-                  <Ic.sparkle />
+                  <Ic.brain />
                 </div>
                 <div className="bg-white border border-[#ece9e4] rounded-2xl rounded-tl-sm px-4 py-3 text-[13px] text-[#4a4540] shadow-[0_1px_4px_rgba(0,0,0,0.04)] leading-relaxed max-w-[85%]">
                   {item.a}
@@ -106,7 +120,7 @@ export function AiChatView({
           {loading && (
             <div className="flex items-start gap-2.5">
               <div className="w-7 h-7 rounded-lg bg-[#e8f4f0] text-[#4a9e87] flex items-center justify-center shrink-0 mt-0.5">
-                <Ic.sparkle />
+                <Ic.brain />
               </div>
               <div className="bg-white border border-[#ece9e4] rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5 shadow-[0_1px_4px_rgba(0,0,0,0.04)]">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#4a9e87] animate-bounce" />
@@ -132,12 +146,15 @@ export function AiChatView({
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (
+                ((e.metaKey || e.ctrlKey) && e.key === "Enter") ||
+                (e.key === "Enter" && !e.shiftKey)
+              ) {
                 e.preventDefault();
                 onSubmit();
               }
             }}
-            placeholder="What do you want to know about your diary?"
+            placeholder="Ask anything from your diary (memory) or your notes… (⌘↵ to send)"
             className="text-[13px] text-[#1c1a18] placeholder:text-[#c0bbb4] leading-relaxed flex-1 outline-none border-none bg-transparent resize-none max-h-24"
           />
           <button
@@ -149,7 +166,7 @@ export function AiChatView({
                 ? "opacity-30 cursor-not-allowed"
                 : "hover:bg-[#3a3530]"
             }`}
-            title="Send query"
+            title="Ask Second Brain"
           >
             <Ic.send />
           </button>
@@ -158,3 +175,4 @@ export function AiChatView({
     </div>
   );
 }
+

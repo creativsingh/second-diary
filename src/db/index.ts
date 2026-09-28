@@ -1,326 +1,18 @@
-import Database from "@tauri-apps/plugin-sql";
-import { drizzle } from "drizzle-orm/sqlite-proxy";
-import { eq, desc } from "drizzle-orm";
 import { isTauri, invoke } from "@tauri-apps/api/core";
-import * as schema from "./schema";
-import type { Entry } from "./schema";
-import type { SearchResult } from "@/types";
+import type { Entry, SearchResult } from "@/types";
 
-export const DB_NAME = "sqlite:second_diary.db";
-
-let dbInstance: ReturnType<typeof drizzle<typeof schema>> | null = null;
-let rawDb: Database | null = null;
-let initPromise: Promise<ReturnType<typeof drizzle<typeof schema>>> | null = null;
-let fallbackDbInstance: BrowserFallbackDb | null = null;
-
-/**
- * Sanitizes and formats user input into a safe SQLite FTS5 query with prefix matching.
- */
-export function formatFtsQuery(rawQuery: string): string {
-  const trimmed = rawQuery.trim();
-  if (!trimmed) return "";
-
-  // If wrapped in double quotes, treat as exact phrase search
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length > 2) {
-    const inner = trimmed.slice(1, -1).replace(/[^\w\s]/g, " ").trim();
-    return inner ? `"${inner}"` : "";
-  }
-
-  // Remove characters that conflict with FTS5 syntax
-  const sanitized = trimmed.replace(/[^\w\s]/g, " ").trim();
-  if (!sanitized) return "";
-
-  const tokens = sanitized.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return "";
-
-  // Suffix each token with wildcard * for prefix matching
-  return tokens.map((t) => `${t}*`).join(" ");
+export interface MarkdownEntryRow {
+  id: string;
+  date: string;
+  hour: number;
+  title: string;
+  content: string;
+  tags: VecStringOrArray;
+  createdAt: string;
+  updatedAt: string;
 }
 
-/**
- * Fallback local storage implementation for testing or running in a standard web browser outside Tauri.
- * Ensures the app functions seamlessly in web preview and tests while maintaining 100% offline isolation.
- */
-class BrowserFallbackDb {
-  private storageKey = "second_diary_browser_entries";
-
-  private getEntries(): Entry[] {
-    try {
-      const data = localStorage.getItem(this.storageKey);
-      if (!data) return [];
-      const parsed = JSON.parse(data);
-      return parsed.map((item: any) => ({
-        ...item,
-        createdAt: new Date(item.createdAt),
-        updatedAt: new Date(item.updatedAt),
-      }));
-    } catch {
-      return [];
-    }
-  }
-
-  private saveEntries(entries: Entry[]) {
-    try {
-      localStorage.setItem(this.storageKey, JSON.stringify(entries));
-    } catch (e) {
-      console.warn("Failed to persist browser fallback entry:", e);
-    }
-  }
-
-  private toDbRow(e: Entry) {
-    const createdMs = e.createdAt instanceof Date ? e.createdAt.getTime() : new Date(e.createdAt).getTime();
-    const updatedMs = e.updatedAt instanceof Date ? e.updatedAt.getTime() : new Date(e.updatedAt).getTime();
-    return {
-      id: e.id,
-      date: e.date,
-      title: e.title,
-      content: e.content,
-      created_at: Math.floor(createdMs / 1000),
-      updated_at: Math.floor(updatedMs / 1000),
-    };
-  }
-
-  async select<T = any>(sql: string, params: unknown[] = []): Promise<T> {
-    const list = this.getEntries();
-    const cleanSql = sql.toLowerCase().replace(/["`]/g, "");
-
-    if (cleanSql.includes("where")) {
-      if (cleanSql.includes(".id =") || cleanSql.includes(" id =")) {
-        const targetId = String(params[0] ?? "");
-        const match = list.find((e) => e.id === targetId);
-        return (match ? [this.toDbRow(match)] : []) as unknown as T;
-      }
-      if (cleanSql.includes(".date =") || cleanSql.includes(" date =")) {
-        const targetDate = String(params[0] ?? "");
-        const matches = list.filter((e) => e.date === targetDate);
-        matches.sort((a, b) => {
-          const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
-          const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
-          return timeB - timeA;
-        });
-        return matches.map((m) => this.toDbRow(m)) as unknown as T;
-      }
-    }
-
-    // Return chronologically descending (newest date first, then newest createdAt first)
-    const sorted = [...list].sort((a, b) => {
-      const dateCmp = b.date.localeCompare(a.date);
-      if (dateCmp !== 0) return dateCmp;
-      const timeA = a.createdAt instanceof Date ? a.createdAt.getTime() : new Date(a.createdAt).getTime();
-      const timeB = b.createdAt instanceof Date ? b.createdAt.getTime() : new Date(b.createdAt).getTime();
-      return timeB - timeA;
-    });
-    return sorted.map((m) => this.toDbRow(m)) as unknown as T;
-  }
-
-  async execute(sql: string, params: unknown[] = []) {
-    const list = this.getEntries();
-    const cleanSql = sql.toLowerCase().replace(/["`]/g, "");
-
-    if (cleanSql.startsWith("insert")) {
-      const newEntry: Entry = {
-        id: String(params[0]),
-        date: String(params[1]),
-        title: String(params[2] ?? ""),
-        content: String(params[3] ?? ""),
-        createdAt: new Date((Number(params[4]) || Math.floor(Date.now() / 1000)) * 1000),
-        updatedAt: new Date((Number(params[5]) || Math.floor(Date.now() / 1000)) * 1000),
-      };
-      const filtered = list.filter((e) => e.id !== newEntry.id);
-      this.saveEntries([...filtered, newEntry]);
-      return { rowsAffected: 1, lastInsertId: 1 };
-    }
-
-    if (cleanSql.startsWith("update")) {
-      const title = String(params[0] ?? "");
-      const content = String(params[1] ?? "");
-      const updatedAt = new Date((Number(params[2]) || Math.floor(Date.now() / 1000)) * 1000);
-      const targetId = String(params[params.length - 1]);
-
-      let changed = false;
-      const updated = list.map((e) => {
-        if (e.id === targetId) {
-          changed = true;
-          return { ...e, title, content, updatedAt };
-        }
-        return e;
-      });
-      if (changed) {
-        this.saveEntries(updated);
-      }
-      return { rowsAffected: changed ? 1 : 0, lastInsertId: undefined };
-    }
-
-    if (cleanSql.startsWith("delete")) {
-      const targetId = String(params[0] ?? "");
-      const before = list.length;
-      const filtered = list.filter((e) => e.id !== targetId);
-      this.saveEntries(filtered);
-      return { rowsAffected: before - filtered.length, lastInsertId: undefined };
-    }
-
-    return { rowsAffected: 0, lastInsertId: undefined };
-  }
-
-  searchEntries(query: string): SearchResult[] {
-    const list = this.getEntries();
-    const clean = query.toLowerCase().trim();
-    if (!clean) return [];
-
-    const matches: SearchResult[] = [];
-    for (const entry of list) {
-      const titleLower = entry.title.toLowerCase();
-      const contentLower = entry.content.toLowerCase();
-      const inTitle = titleLower.includes(clean);
-      const inContent = contentLower.includes(clean);
-
-      if (inTitle || inContent) {
-        let snippetText = "";
-        if (inContent) {
-          const idx = contentLower.indexOf(clean);
-          const start = Math.max(0, idx - 30);
-          const end = Math.min(entry.content.length, idx + clean.length + 30);
-          const prefix = start > 0 ? "..." : "";
-          const suffix = end < entry.content.length ? "..." : "";
-          const matchSlice = entry.content.slice(idx, idx + clean.length);
-          snippetText = `${prefix}${entry.content.slice(start, idx)}<mark>${matchSlice}</mark>${entry.content.slice(idx + clean.length, end)}${suffix}`;
-        } else {
-          snippetText = entry.title.replace(
-            new RegExp(`(${clean})`, "gi"),
-            "<mark>$1</mark>"
-          );
-        }
-
-        matches.push({
-          id: entry.id,
-          date: entry.date,
-          title: entry.title || "Untitled entry",
-          snippet: snippetText,
-          rank: 0,
-        });
-      }
-    }
-    return matches;
-  }
-}
-
-/**
- * Initializes and returns the local SQLite database client bridged through Tauri 2.
- * Stores data locally in macOS Application Support with zero cloud dependency.
- */
-export async function getDb(): Promise<ReturnType<typeof drizzle<typeof schema>>> {
-  if (dbInstance) {
-    return dbInstance;
-  }
-
-  if (initPromise) {
-    return initPromise;
-  }
-
-  initPromise = (async () => {
-    const runningInTauri = isTauri();
-
-    if (runningInTauri) {
-      rawDb = await Database.load(DB_NAME);
-
-      // Execute schema initialization: base table, unique index, FTS5 table, and triggers
-      const ddlStatements = [
-        `CREATE TABLE IF NOT EXISTS entries (
-          id TEXT PRIMARY KEY NOT NULL,
-          date TEXT NOT NULL,
-          title TEXT NOT NULL DEFAULT '',
-          content TEXT NOT NULL DEFAULT '',
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
-        );`,
-        `DROP INDEX IF EXISTS entries_date_unique;`,
-        `CREATE INDEX IF NOT EXISTS entries_date_idx ON entries (date);`,
-        `CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-          id UNINDEXED,
-          date UNINDEXED,
-          title,
-          content
-        );`,
-        `CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
-          INSERT INTO entries_fts(id, date, title, content) VALUES (new.id, new.date, new.title, new.content);
-        END;`,
-        `CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
-          DELETE FROM entries_fts WHERE id = old.id;
-          INSERT INTO entries_fts(id, date, title, content) VALUES (new.id, new.date, new.title, new.content);
-        END;`,
-        `CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
-          DELETE FROM entries_fts WHERE id = old.id;
-        END;`,
-        `INSERT INTO entries_fts(id, date, title, content)
-         SELECT id, date, title, content FROM entries
-         WHERE id NOT IN (SELECT id FROM entries_fts);`,
-      ];
-
-      for (const ddl of ddlStatements) {
-        try {
-          await rawDb.execute(ddl);
-        } catch (e) {
-          console.warn("[Second Diary] DDL execution warning:", e);
-        }
-      }
-
-      dbInstance = drizzle<typeof schema>(
-        async (sql, params, method) => {
-          if (!rawDb) throw new Error("SQLite database not loaded");
-
-          if (method === "all" || method === "values") {
-            const rows = await rawDb.select<Record<string, any>[]>(sql, params);
-            return { rows: rows.map((row) => Object.values(row)) };
-          }
-
-          if (method === "get") {
-            const rows = await rawDb.select<Record<string, any>[]>(sql, params);
-            return { rows: (rows.length > 0 ? Object.values(rows[0]) : undefined) as any };
-          }
-
-          const result = await rawDb.execute(sql, params);
-          return {
-            rows: [],
-            rowsAffected: result.rowsAffected,
-            lastInsertId: result.lastInsertId,
-          };
-        },
-        { schema }
-      );
-    } else {
-      console.info("[Second Diary] Running outside Tauri: Using local browser fallback storage.");
-      fallbackDbInstance = new BrowserFallbackDb();
-
-      dbInstance = drizzle<typeof schema>(
-        async (sql, params, method) => {
-          if (!fallbackDbInstance) throw new Error("Fallback database not loaded");
-
-          if (method === "all" || method === "values") {
-            const rows = await fallbackDbInstance.select<Record<string, any>[]>(sql, params);
-            return { rows: rows.map((row) => Object.values(row)) };
-          }
-
-          if (method === "get") {
-            const rows = await fallbackDbInstance.select<Record<string, any>[]>(sql, params);
-            return { rows: (rows.length > 0 ? Object.values(rows[0]) : undefined) as any };
-          }
-
-          const result = await fallbackDbInstance.execute(sql, params);
-          return {
-            rows: [],
-            rowsAffected: result.rowsAffected,
-            lastInsertId: result.lastInsertId,
-          };
-        },
-        { schema }
-      );
-    }
-
-    return dbInstance;
-  })();
-
-  return initPromise;
-}
+type VecStringOrArray = string[];
 
 /**
  * Returns today's local date string formatted as YYYY-MM-DD.
@@ -403,117 +95,265 @@ export function formatDayOfWeek(dateStr: string): string {
 }
 
 /**
- * Fetches the most recent entry for a date (YYYY-MM-DD) from the local SQLite database.
+ * Sanitizes search queries by stripping special characters.
  */
-export async function getEntryByDate(dateStr: string): Promise<Entry | null> {
-  const db = await getDb();
-  const rows = await db
-    .select()
-    .from(schema.entries)
-    .where(eq(schema.entries.date, dateStr))
-    .orderBy(desc(schema.entries.createdAt));
-
-  return rows.length > 0 ? rows[0] : null;
+export function formatSearchQuery(rawQuery: string): string {
+  return rawQuery.trim().replace(/[^\w\s-]/g, " ").trim();
 }
 
 /**
- * Fetches an entry by its ID from the local SQLite database.
+ * Parses #tags from Markdown text content.
  */
-export async function getEntryById(id: string): Promise<Entry | null> {
-  const db = await getDb();
-  const rows = await db
-    .select()
-    .from(schema.entries)
-    .where(eq(schema.entries.id, id));
-
-  return rows.length > 0 ? rows[0] : null;
+export function parseTags(content: string): string[] {
+  const match = content.match(/#([\w-]+)/g);
+  return match ? Array.from(new Set(match.map((t) => t.slice(1)))) : [];
 }
 
 /**
- * Fetches all entries for a specific date (YYYY-MM-DD), ordered by newest createdAt first.
+ * In-memory / localStorage fallback storage for running in a web browser or unit tests.
+ * Maintains 100% offline isolation and parity with Markdown files.
  */
-export async function getEntriesByDate(dateStr: string): Promise<Entry[]> {
-  const db = await getDb();
-  return db
-    .select()
-    .from(schema.entries)
-    .where(eq(schema.entries.date, dateStr))
-    .orderBy(desc(schema.entries.createdAt));
+class BrowserMarkdownStore {
+  private storageKey = "second_diary_markdown_entries";
+
+  getEntries(): Entry[] {
+    try {
+      const data = localStorage.getItem(this.storageKey);
+      if (!data) return [];
+      const parsed = JSON.parse(data);
+      return parsed.map((item: any) => ({
+        ...item,
+        createdAt: item.createdAt ? new Date(item.createdAt) : new Date(),
+        updatedAt: item.updatedAt ? new Date(item.updatedAt) : new Date(),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  saveEntries(entries: Entry[]) {
+    try {
+      localStorage.setItem(this.storageKey, JSON.stringify(entries));
+    } catch (e) {
+      console.warn("[BrowserMarkdownStore] Failed to save entries:", e);
+    }
+  }
+
+  saveEntry(entry: Entry): Entry {
+    const list = this.getEntries();
+    const existingIndex = list.findIndex((e) => e.id === entry.id);
+    let updated: Entry[];
+
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = { ...entry, updatedAt: new Date() };
+    } else {
+      updated = [entry, ...list];
+    }
+
+    this.saveEntries(updated);
+    return entry;
+  }
+
+  deleteEntry(id: string): boolean {
+    const list = this.getEntries();
+    const filtered = list.filter((e) => e.id !== id);
+    if (filtered.length !== list.length) {
+      this.saveEntries(filtered);
+      return true;
+    }
+    return false;
+  }
+
+  search(query: string): SearchResult[] {
+    const list = this.getEntries();
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+
+    const tokens = q.split(/\s+/).filter(Boolean);
+    const results: SearchResult[] = [];
+
+    for (const item of list) {
+      const titleLower = (item.title || "").toLowerCase();
+      const bodyLower = (item.body || "").toLowerCase();
+      const tagsJoined = (item.tags || []).join(" ").toLowerCase();
+
+      const allMatch = tokens.every(
+        (t) =>
+          titleLower.includes(t) ||
+          bodyLower.includes(t) ||
+          tagsJoined.includes(t)
+      );
+
+      if (allMatch) {
+        let snippet = "";
+        const firstToken = tokens[0];
+        const pos = bodyLower.indexOf(firstToken);
+
+        if (pos >= 0) {
+          const start = Math.max(0, pos - 30);
+          const end = Math.min(item.body.length, pos + firstToken.length + 60);
+          const raw = item.body.slice(start, end);
+          const prefix = start > 0 ? "..." : "";
+          const suffix = end < item.body.length ? "..." : "";
+          const regex = new RegExp(`(${firstToken})`, "gi");
+          snippet = `${prefix}${raw.replace(regex, "<mark>$1</mark>")}${suffix}`;
+        } else if (item.body) {
+          snippet = `${item.body.slice(0, 80)}...`;
+        } else {
+          snippet = `Matched in title: ${item.title}`;
+        }
+
+        results.push({
+          id: item.id,
+          date: item.date,
+          title: item.title,
+          snippet,
+          rank: titleLower.includes(q) ? 1 : 2,
+        });
+      }
+    }
+
+    results.sort((a, b) => a.rank - b.rank);
+    return results;
+  }
+}
+
+const browserStore = new BrowserMarkdownStore();
+
+/**
+ * Fetches all saved entries from local Markdown files in ~/Documents/Second Diary/,
+ * ordered chronologically (newest date first, then newest hour).
+ */
+export async function getAllEntries(): Promise<Entry[]> {
+  if (isTauri()) {
+    try {
+      const rows = await invoke<MarkdownEntryRow[]>("read_all_markdown_entries");
+      return rows.map((r) => {
+        const createdDate = r.createdAt ? new Date(r.createdAt) : new Date();
+        const updatedDate = r.updatedAt ? new Date(r.updatedAt) : new Date();
+        return {
+          id: r.id,
+          date: r.date,
+          hour: r.hour,
+          title: r.title,
+          body: r.content,
+          tags: r.tags || parseTags(r.content),
+          createdAt: createdDate,
+          updatedAt: updatedDate,
+        };
+      });
+    } catch (e) {
+      console.error("[Second Diary] Failed to read markdown entries from disk:", e);
+      return [];
+    }
+  }
+
+  // Web / non-Tauri fallback
+  return browserStore.getEntries();
 }
 
 /**
- * Automatically synchronizes an entry to a Markdown (.md) file with YAML frontmatter
- * in ~/Documents/Second Diary/ alongside SQLite persistence.
+ * Saves (creates or updates) a diary entry directly as a Markdown (.md) file
+ * with YAML frontmatter in ~/Documents/Second Diary/.
  */
-export async function syncMarkdownEntry(entry: {
-  id: string;
+export async function saveEntry(data: {
+  id?: string;
   date: string;
   title: string;
   content: string;
-  createdAt: Date | string | number;
-  updatedAt?: Date | string | number;
-}): Promise<string | null> {
-  if (!isTauri()) return null;
+  createdAt?: Date;
+  hour?: number;
+}): Promise<Entry> {
+  const now = new Date();
+  const entryId = data.id || crypto.randomUUID();
+  const entryCreatedAt = data.createdAt || now;
+  const entryHour =
+    data.hour !== undefined
+      ? data.hour
+      : Math.round((entryCreatedAt.getHours() + entryCreatedAt.getMinutes() / 60) * 10) / 10;
+  const tags = parseTags(data.content);
 
-  try {
-    const createdDate =
-      entry.createdAt instanceof Date
-        ? entry.createdAt
-        : new Date(entry.createdAt);
-    const updatedDate = entry.updatedAt
-      ? entry.updatedAt instanceof Date
-        ? entry.updatedAt
-        : new Date(entry.updatedAt)
-      : new Date();
+  const entry: Entry = {
+    id: entryId,
+    date: data.date,
+    title: data.title,
+    body: data.content,
+    hour: entryHour,
+    tags,
+    createdAt: entryCreatedAt,
+    updatedAt: now,
+  };
 
-    const hours = String(createdDate.getHours()).padStart(2, "0");
-    const minutes = String(createdDate.getMinutes()).padStart(2, "0");
+  if (isTauri()) {
+    const hours = String(entryCreatedAt.getHours()).padStart(2, "0");
+    const minutes = String(entryCreatedAt.getMinutes()).padStart(2, "0");
     const timeStr = `${hours}:${minutes}`;
 
-    const tagMatches = entry.content.match(/#([\w-]+)/g);
-    const tags = tagMatches
-      ? Array.from(new Set(tagMatches.map((t) => t.slice(1))))
-      : [];
-
-    const filePath = await invoke<string>("save_markdown_entry", {
-      id: entry.id,
-      date: entry.date,
-      timeStr,
-      title: entry.title,
-      content: entry.content,
-      tags,
-      createdAt: createdDate.toISOString(),
-      updatedAt: updatedDate.toISOString(),
-    });
-
-    return filePath;
-  } catch (e) {
-    console.warn("[Second Diary] Failed to sync markdown entry:", e);
-    return null;
+    try {
+      await invoke<string>("save_markdown_entry", {
+        id: entry.id,
+        date: entry.date,
+        timeStr,
+        title: entry.title,
+        content: entry.body,
+        tags: entry.tags,
+        createdAt: entryCreatedAt.toISOString(),
+        updatedAt: now.toISOString(),
+      });
+    } catch (e) {
+      console.error("[Second Diary] Failed to save markdown entry:", e);
+      throw e;
+    }
+  } else {
+    browserStore.saveEntry(entry);
   }
+
+  return entry;
 }
 
 /**
- * Removes the corresponding .md file for an entry from ~/Documents/Second Diary/.
+ * Deletes a diary entry by removing its .md file from ~/Documents/Second Diary/.
  */
-export async function deleteMarkdownEntry(id: string): Promise<boolean> {
-  if (!isTauri()) return false;
-  try {
-    return await invoke<boolean>("delete_markdown_entry", { id });
-  } catch (e) {
-    console.warn("[Second Diary] Failed to delete markdown entry:", e);
-    return false;
+export async function deleteEntry(id: string): Promise<boolean> {
+  if (isTauri()) {
+    try {
+      return await invoke<boolean>("delete_markdown_entry", { id });
+    } catch (e) {
+      console.error("[Second Diary] Failed to delete markdown entry:", e);
+      return false;
+    }
   }
+  return browserStore.deleteEntry(id);
 }
 
 /**
- * Reveals and opens the user's Second Diary markdown folder (~/Documents/Second Diary/) in Finder.
+ * Searches Markdown entries with contextual snippets and <mark> highlights.
+ */
+export async function searchEntries(query: string): Promise<SearchResult[]> {
+  const sanitized = formatSearchQuery(query);
+  if (!sanitized) return [];
+
+  if (isTauri()) {
+    try {
+      return await invoke<SearchResult[]>("search_markdown_entries", {
+        query: sanitized,
+      });
+    } catch (e) {
+      console.error("[Second Diary] Failed to search markdown entries:", e);
+      return [];
+    }
+  }
+
+  return browserStore.search(sanitized);
+}
+
+/**
+ * Opens the Second Diary folder in macOS Finder (~/Documents/Second Diary/).
  */
 export async function openMarkdownFolder(): Promise<string | null> {
   if (!isTauri()) {
-    console.info(
-      "[Second Diary] Running outside Tauri: Markdown folder is in ~/Documents/Second Diary/"
-    );
+    console.info("[Second Diary] Markdown folder is in ~/Documents/Second Diary/");
     return null;
   }
   try {
@@ -525,14 +365,11 @@ export async function openMarkdownFolder(): Promise<string | null> {
 }
 
 /**
- * Reveals and highlights the specific .md file for an entry in macOS Finder.
+ * Highlights the specific .md file in macOS Finder.
  */
 export async function revealMarkdownFile(id: string): Promise<string | null> {
   if (!isTauri()) {
-    console.info(
-      "[Second Diary] Running outside Tauri: Markdown file is in ~/Documents/Second Diary/"
-    );
-    return null;
+    return openMarkdownFolder();
   }
   try {
     return await invoke<string>("reveal_markdown_file", { id });
@@ -543,151 +380,10 @@ export async function revealMarkdownFile(id: string): Promise<string | null> {
 }
 
 /**
- * Synchronizes all entries currently stored in SQLite to Markdown files on disk.
- * Runs on application startup to ensure all existing entries exist in ~/Documents/Second Diary/.
+ * Pure Markdown architecture: entries already exist natively as .md files!
  */
 export async function syncAllEntriesToMarkdown(): Promise<void> {
-  if (!isTauri()) return;
-  try {
-    const all = await getAllEntries();
-    for (const entry of all) {
-      await syncMarkdownEntry(entry);
-    }
-  } catch (e) {
-    console.warn("[Second Diary] Failed to bulk sync markdown entries:", e);
-  }
+  // No-op: all entries are pure Markdown files directly in ~/Documents/Second Diary/
 }
 
-/**
- * Saves (inserts or updates) a diary entry in the local SQLite database via Drizzle ORM
- * and dual-syncs to a human-readable .md file in ~/Documents/Second Diary/.
- */
-export async function saveEntry(data: {
-  id?: string;
-  date: string;
-  title: string;
-  content: string;
-  createdAt?: Date;
-}): Promise<Entry> {
-  const db = await getDb();
-  const now = new Date();
-
-  let existing: Entry | null = null;
-  if (data.id) {
-    existing = await getEntryById(data.id);
-  }
-
-  if (existing) {
-    await db
-      .update(schema.entries)
-      .set({
-        title: data.title,
-        content: data.content,
-        updatedAt: now,
-      })
-      .where(eq(schema.entries.id, existing.id));
-
-    const updatedEntry: Entry = {
-      ...existing,
-      title: data.title,
-      content: data.content,
-      updatedAt: now,
-    };
-
-    // Dual-sync to local .md file in ~/Documents/Second Diary/
-    syncMarkdownEntry(updatedEntry).catch((err) =>
-      console.warn("[Second Diary] Dual-sync markdown update error:", err)
-    );
-
-    return updatedEntry;
-  } else {
-    const entryId = data.id || crypto.randomUUID();
-    const entryCreatedAt = data.createdAt || now;
-    const newEntry: Entry = {
-      id: entryId,
-      date: data.date,
-      title: data.title,
-      content: data.content,
-      createdAt: entryCreatedAt,
-      updatedAt: now,
-    };
-
-    await db.insert(schema.entries).values(newEntry);
-
-    // Dual-sync to local .md file in ~/Documents/Second Diary/
-    syncMarkdownEntry(newEntry).catch((err) =>
-      console.warn("[Second Diary] Dual-sync markdown insert error:", err)
-    );
-
-    return newEntry;
-  }
-}
-
-/**
- * Deletes an entry by its ID from the local SQLite database and removes its .md file.
- */
-export async function deleteEntry(id: string): Promise<boolean> {
-  // Dual-sync: remove corresponding .md file from ~/Documents/Second Diary/
-  deleteMarkdownEntry(id).catch((err) =>
-    console.warn("[Second Diary] Dual-sync markdown delete error:", err)
-  );
-
-  await getDb();
-  if (isTauri() && rawDb) {
-    await rawDb.execute("DELETE FROM entries WHERE id = ?;", [id]);
-    return true;
-  } else if (fallbackDbInstance) {
-    await fallbackDbInstance.execute("DELETE FROM entries WHERE id = ?", [id]);
-    return true;
-  } else if (dbInstance) {
-    await dbInstance.delete(schema.entries).where(eq(schema.entries.id, id));
-    return true;
-  }
-  return false;
-}
-
-/**
- * Fetches all saved entries from the local database, ordered chronologically (newest date first, then newest createdAt).
- */
-export async function getAllEntries(): Promise<Entry[]> {
-  const db = await getDb();
-  return db
-    .select()
-    .from(schema.entries)
-    .orderBy(desc(schema.entries.date), desc(schema.entries.createdAt));
-}
-
-/**
- * Executes a full-text search across entry titles and content using SQLite FTS5.
- * Returns matching records with ranked relevance and contextual snippets with highlight marks.
- * 100% offline with zero cloud or vector DB dependencies.
- */
-export async function searchEntries(query: string): Promise<SearchResult[]> {
-  const ftsQuery = formatFtsQuery(query);
-  if (!ftsQuery) return [];
-
-  await getDb(); // Ensure database and FTS5 tables are initialized
-
-  if (isTauri() && rawDb) {
-    const sql = `
-      SELECT
-        id,
-        date,
-        title,
-        snippet(entries_fts, -1, '<mark>', '</mark>', '...', 16) AS snippet,
-        bm25(entries_fts) AS rank
-      FROM entries_fts
-      WHERE entries_fts MATCH ?
-      ORDER BY rank;
-    `;
-    const rows = await rawDb.select<SearchResult[]>(sql, [ftsQuery]);
-    return rows;
-  } else if (fallbackDbInstance) {
-    return fallbackDbInstance.searchEntries(query);
-  }
-
-  return [];
-}
-
-export { schema };
 export type { SearchResult };

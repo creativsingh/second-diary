@@ -8,6 +8,7 @@ export const Ic = {
       stroke="currentColor"
       strokeWidth="1.4"
       strokeLinecap="round"
+      style={{ borderWidth: 0 }}
     >
       <rect x="2" y="2" width="11" height="11" rx="2" />
       <line x1="4.5" y1="5" x2="10.5" y2="5" />
@@ -15,6 +16,44 @@ export const Ic = {
       <line x1="4.5" y1="10" x2="8.5" y2="10" />
     </svg>
   ),
+  notes: () => (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 15 15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ borderWidth: 0 }}
+    >
+      <path d="M3 2.5h6l3.5 3.5V12.5A1 1 0 0 1 11.5 13.5h-8.5A1 1 0 0 1 2 12.5v-9A1 1 0 0 1 3 2.5z" />
+      <path d="M9 2.5V6h3.5" />
+      <line x1="4.5" y1="8.5" x2="10.5" y2="8.5" />
+      <line x1="4.5" y1="10.5" x2="8.5" y2="10.5" />
+    </svg>
+  ),
+  brain: () => (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 15 15"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ borderWidth: 0 }}
+    >
+      <path d="M6 3.5A2.5 2.5 0 0 0 2 6c0 1 .5 1.8 1.2 2.2A2.5 2.5 0 0 0 4 12.5c.8 0 1.5-.4 2-1" />
+      <path d="M9 3.5A2.5 2.5 0 0 1 13 6c0 1-.5 1.8-1.2 2.2A2.5 2.5 0 0 1 11 12.5c-.8 0-1.5-.4-2-1" />
+      <line x1="7.5" y1="3" x2="7.5" y2="12" />
+      <path d="M5.5 6.5h4" />
+      <path d="M5.5 9.5h4" />
+    </svg>
+  ),
+
   ai: () => (
     <svg
       width="15"
@@ -24,8 +63,49 @@ export const Ic = {
       stroke="currentColor"
       strokeWidth="1.4"
       strokeLinecap="round"
+      style={{ borderWidth: 0 }}
     >
       <path d="M12.5 7.5A5 5 0 0 0 3.5 5.5c0 1.2.4 2.3 1.2 3.1L3.5 12l3.4-1.2c.8.4 1.7.7 2.6.7a5 5 0 0 0 3-4z" />
+    </svg>
+  ),
+  pen: () => (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ borderWidth: 0 }}
+    >
+      <path d="M10 2l2 2-7.5 7.5H2.5v-2L10 2z" />
+    </svg>
+  ),
+  stop: () => (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 14 14"
+      fill="currentColor"
+      style={{ borderWidth: 0 }}
+    >
+      <rect x="3" y="3" width="8" height="8" rx="1.5" />
+    </svg>
+  ),
+  chevronDown: () => (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      style={{ borderWidth: 0 }}
+    >
+      <path d="M3 4.5l3 3 3-3" />
     </svg>
   ),
   tag: () => (

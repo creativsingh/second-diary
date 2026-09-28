@@ -7,6 +7,16 @@
 }
 
 :root {
+  --color-surface: #fdfcfb;
+  --color-panel: #f7f5f2;
+  --color-border: #ece9e4;
+  --color-muted: #b5afa7;
+  --color-text: #1c1a18;
+  --color-accent: #7c6f5b;
+  --color-accent-light: #f0ece5;
+  --color-ai: #e8f4f0;
+  --color-ai-accent: #4a9e87;
+
   --surface: #fdfcfb;
   --panel: #f7f5f2;
   --border: #ece9e4;
@@ -21,6 +31,11 @@
   --ai-bg: #e8f4f0;
   --ai-accent: #4a9e87;
   --ink: #1c1a18;
+}
+
+svg {
+  border: none;
+  border-width: 0;
 }
 
 * {
@@ -52,6 +67,42 @@ textarea, input {
   background: transparent;
   border: none;
   resize: none;
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50%       { transform: scale(1.1); opacity: 0.9; }
+}
+
+@keyframes pulse-ring {
+  0%   { transform: scale(1); opacity: 0.45; }
+  100% { transform: scale(1.7); opacity: 0; }
+}
+
+@keyframes dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); }
+  40%           { transform: translateY(-5px); }
+}
+
+@keyframes expandFloat {
+  from { opacity: 0; transform: scale(0.88) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.animate-breathe {
+  animation: breathe 3s ease-in-out infinite;
+}
+
+.animate-pulse-ring {
+  animation: pulse-ring 1.4s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+
+.animate-dot-bounce {
+  animation: dot-bounce 1.2s infinite ease-in-out;
+}
+
+.animate-expand-float {
+  animation: expandFloat 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @media print {

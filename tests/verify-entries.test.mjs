@@ -2,845 +2,413 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { drizzle } from "drizzle-orm/sqlite-proxy";
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
-import { eq, desc } from "drizzle-orm";
 
-// Define the exact schema as specified in requirement 3
-const entries = sqliteTable("entries", {
-  id: text("id").primaryKey(),
-  date: text("date").notNull(),
-  title: text("title").notNull().default(""),
-  content: text("content").notNull().default(""),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
-});
+const TEST_DIR = path.join(process.cwd(), "tests", "test_markdown_diary");
 
-const TEST_DB_PATH = path.join(process.cwd(), "tests", "test_second_diary.db");
-
-// FTS query sanitizer mirroring src/db/index.ts
-function formatFtsQuery(rawQuery) {
-  const trimmed = rawQuery.trim();
-  if (!trimmed) return "";
-
-  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length > 2) {
-    const inner = trimmed.slice(1, -1).replace(/[^\w\s]/g, " ").trim();
-    return inner ? `"${inner}"` : "";
-  }
-
-  const sanitized = trimmed.replace(/[^\w\s]/g, " ").trim();
-  if (!sanitized) return "";
-
-  const tokens = sanitized.split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return "";
-
-  return tokens.map((t) => `${t}*`).join(" ");
+// Helper to sanitize filename mirroring Rust backend
+function sanitizeFilename(title) {
+  const clean = title.replace(/[^\w\s-]/g, "_").trim();
+  const truncated = clean.slice(0, 50).trim();
+  return truncated || "Untitled";
 }
 
-// Helper to simulate Tauri plugin-sql bridge over a real SQLite database file
-function createDrizzleBridge(dbFilePath) {
-  const rawDb = new DatabaseSync(dbFilePath);
-
-  // Initialize schema with FTS5 virtual table and triggers
-  rawDb.exec(`
-    CREATE TABLE IF NOT EXISTS entries (
-      id TEXT PRIMARY KEY NOT NULL,
-      date TEXT NOT NULL,
-      title TEXT NOT NULL DEFAULT '',
-      content TEXT NOT NULL DEFAULT '',
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    DROP INDEX IF EXISTS entries_date_unique;
-    CREATE INDEX IF NOT EXISTS entries_date_idx ON entries (date);
-
-    CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-      id UNINDEXED,
-      date UNINDEXED,
-      title,
-      content
-    );
-
-    CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
-      INSERT INTO entries_fts(id, date, title, content) VALUES (new.id, new.date, new.title, new.content);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
-      DELETE FROM entries_fts WHERE id = old.id;
-      INSERT INTO entries_fts(id, date, title, content) VALUES (new.id, new.date, new.title, new.content);
-    END;
-
-    CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
-      DELETE FROM entries_fts WHERE id = old.id;
-    END;
-  `);
-
-  // Same proxy mapping used in src/db/index.ts
-  const db = drizzle(
-    async (sql, params, method) => {
-      if (method === "all" || method === "values") {
-        const stmt = rawDb.prepare(sql);
-        const rows = stmt.all(...params);
-        return { rows: rows.map((r) => Object.values(r)) };
-      }
-
-      if (method === "get") {
-        const stmt = rawDb.prepare(sql);
-        const row = stmt.get(...params);
-        return { rows: row ? Object.values(row) : undefined };
-      }
-
-      const stmt = rawDb.prepare(sql);
-      const info = stmt.run(...params);
-      return {
-        rows: [],
-        rowsAffected: Number(info.changes),
-        lastInsertId: Number(info.lastInsertRowid),
-      };
-    },
-    { schema: { entries } }
-  );
-
-  return {
-    db,
-    search: (query) => {
-      const ftsQuery = formatFtsQuery(query);
-      if (!ftsQuery) return [];
-      const stmt = rawDb.prepare(`
-        SELECT
-          id,
-          date,
-          title,
-          snippet(entries_fts, -1, '<mark>', '</mark>', '...', 16) AS snippet,
-          bm25(entries_fts) AS rank
-        FROM entries_fts
-        WHERE entries_fts MATCH ?
-        ORDER BY rank;
-      `);
-      return stmt.all(ftsQuery);
-    },
-    close: () => rawDb.close(),
-  };
-}
-
-// Date helpers mirroring src/db/index.ts
-function shiftDateString(dateStr, offsetDays) {
-  const [year, month, day] = dateStr.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  date.setDate(date.getDate() + offsetDays);
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function getRelativeDateLabel(dateStr, today) {
-  if (dateStr === today) return "Today";
-  if (dateStr === shiftDateString(today, -1)) return "Yesterday";
-  if (dateStr === shiftDateString(today, 1)) return "Tomorrow";
-  return null;
-}
-
-test("Diary Lifecycle & FTS5 Full-Text Search Verification", async (t) => {
-  // Clean up any old test database
-  if (fs.existsSync(TEST_DB_PATH)) {
-    fs.unlinkSync(TEST_DB_PATH);
-  }
-
-  const todayDate = "2026-09-23";
-  const entryId = "entry-uuid-today-1";
-  const initialTitle = "First Morning in Second Diary";
-  const initialContent = "Starting my personal private journal locally on my Mac with SQLite.";
-  const createdDate = new Date("2026-09-23T08:00:00Z");
-
-  // Step 1: Open session 1 (App launched for the first time)
-  await t.test("Step 1 & 2: Create today's entry and save to SQLite via Drizzle", async () => {
-    const session1 = createDrizzleBridge(TEST_DB_PATH);
-
-    // Verify today's entry does not exist yet
-    const existing = await session1.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, todayDate));
-    assert.equal(existing.length, 0, "Initially today's entry should not exist");
-
-    // Create today's entry
-    await session1.db.insert(entries).values({
-      id: entryId,
-      date: todayDate,
-      title: initialTitle,
-      content: initialContent,
-      createdAt: createdDate,
-      updatedAt: createdDate,
-    });
-
-    // Read back to confirm initial save
-    const saved = await session1.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, todayDate));
-
-    assert.equal(saved.length, 1);
-    assert.equal(saved[0].id, entryId);
-    assert.equal(saved[0].date, todayDate);
-    assert.equal(saved[0].title, initialTitle);
-    assert.equal(saved[0].content, initialContent);
-
-    // Edit and save again (simulate autosave / edits)
-    const updatedContent =
-      "Starting my personal private journal locally on my Mac with SQLite. Added evening reflections about cryptography!";
-    const updatedTitle = "First Day in Second Diary (Reflections)";
-    const updatedDate = new Date("2026-09-23T18:30:00Z");
-
-    await session1.db
-      .update(entries)
-      .set({
-        title: updatedTitle,
-        content: updatedContent,
-        updatedAt: updatedDate,
-      })
-      .where(eq(entries.id, entryId));
-
-    const updated = await session1.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, todayDate));
-
-    assert.equal(updated.length, 1);
-    assert.equal(updated[0].title, updatedTitle);
-    assert.equal(updated[0].content, updatedContent);
-
-    session1.close();
-  });
-
-  // Step 3: Verify the database file physically exists on disk
-  await t.test("Step 3: Database file exists on disk", () => {
-    assert.ok(fs.existsSync(TEST_DB_PATH), "SQLite database file must exist on disk");
-    const stats = fs.statSync(TEST_DB_PATH);
-    assert.ok(stats.size > 0, "SQLite database file must not be empty");
-  });
-
-  // Step 4: Open session 2 (Reopen the application)
-  await t.test(
-    "Step 4 & 5: Reopen application, connect to SQLite file, read saved entry",
-    async () => {
-      const session2 = createDrizzleBridge(TEST_DB_PATH);
-
-      const rows = await session2.db
-        .select()
-        .from(entries)
-        .where(eq(entries.date, todayDate));
-
-      assert.equal(rows.length, 1, "Must find exactly 1 entry for today's date upon reopening");
-      const todayEntry = rows[0];
-
-      assert.equal(todayEntry.id, entryId);
-      assert.equal(todayEntry.date, todayDate);
-      assert.equal(todayEntry.title, "First Day in Second Diary (Reflections)");
-      assert.equal(
-        todayEntry.content,
-        "Starting my personal private journal locally on my Mac with SQLite. Added evening reflections about cryptography!"
-      );
-      assert.ok(todayEntry.createdAt instanceof Date, "createdAt must be deserialized as Date");
-      assert.ok(todayEntry.updatedAt instanceof Date, "updatedAt must be deserialized as Date");
-
-      session2.close();
-    }
-  );
-
-  // Step 5: Timeline chronological queries & empty date navigation
-  await t.test(
-    "Timeline: Chronological order, empty date navigation, and past entries",
-    async () => {
-      const session = createDrizzleBridge(TEST_DB_PATH);
-
-      const pastDate1 = shiftDateString(todayDate, -3); // 2026-09-20
-      await session.db.insert(entries).values({
-        id: "entry-past-3",
-        date: pastDate1,
-        title: "Weekend Trip to Yosemite",
-        content: "Went hiking through the redwood groves and took magnificent photos.",
-        createdAt: new Date("2026-09-20T10:00:00Z"),
-        updatedAt: new Date("2026-09-20T10:00:00Z"),
-      });
-
-      const pastDate2 = shiftDateString(todayDate, -5); // 2026-09-18
-      await session.db.insert(entries).values({
-        id: "entry-past-5",
-        date: pastDate2,
-        title: "Rust and Tauri Architecture",
-        content: "Configured local environment and verified zero telemetry policy.",
-        createdAt: new Date("2026-09-18T10:00:00Z"),
-        updatedAt: new Date("2026-09-18T10:00:00Z"),
-      });
-
-      const allChronological = await session.db
-        .select()
-        .from(entries)
-        .orderBy(desc(entries.date));
-
-      assert.equal(allChronological.length, 3);
-      assert.equal(allChronological[0].date, "2026-09-23", "Newest (today) must be first");
-      assert.equal(allChronological[1].date, "2026-09-20", "Middle entry must be second");
-      assert.equal(allChronological[2].date, "2026-09-18", "Oldest entry must be third");
-
-      // Verify empty date navigation
-      const yesterdayDate = shiftDateString(todayDate, -1);
-      const yesterdayEntry = await session.db
-        .select()
-        .from(entries)
-        .where(eq(entries.date, yesterdayDate));
-
-      assert.equal(yesterdayEntry.length, 0, "Yesterday should be navigable as an empty date");
-
-      session.close();
-    }
-  );
-
-  // Step 6: SQLite FTS5 Full-Text Search Verification
-  await t.test("SQLite FTS5: Title search, content search, snippets, and prefix matching", async () => {
-    const session = createDrizzleBridge(TEST_DB_PATH);
-
-    // 1. Search matching in title: "Yosemite"
-    const titleResults = session.search("Yosemite");
-    assert.equal(titleResults.length, 1);
-    assert.equal(titleResults[0].date, "2026-09-20");
-    assert.ok(titleResults[0].snippet.includes("<mark>Yosemite</mark>"));
-
-    // 2. Search matching in content: "cryptography"
-    const contentResults = session.search("cryptography");
-    assert.equal(contentResults.length, 1);
-    assert.equal(contentResults[0].date, "2026-09-23");
-    assert.ok(contentResults[0].snippet.includes("<mark>cryptography</mark>"));
-
-    // 3. Search with prefix matching: "telemetr" matching "telemetry"
-    const prefixResults = session.search("telemetr");
-    assert.equal(prefixResults.length, 1);
-    assert.equal(prefixResults[0].date, "2026-09-18");
-    assert.ok(prefixResults[0].snippet.includes("<mark>telemetry</mark>"));
-
-    // 4. Search matching across multiple words: "redwood hiking"
-    const multiWordResults = session.search("redwood hiking");
-    assert.equal(multiWordResults.length, 1);
-    assert.equal(multiWordResults[0].date, "2026-09-20");
-
-    // 5. Query sanitization: special symbols do not crash or error
-    const specialResults = session.search("??? --- ((++)) !!!");
-    assert.equal(specialResults.length, 0, "Invalid query tokens should safely return empty");
-
-    // 6. Search when no match: "quantum supercomputer"
-    const noResults = session.search("quantum supercomputer");
-    assert.equal(noResults.length, 0);
-
-    // 7. Verify update synchronization: update an entry and re-search
-    await session.db
-      .update(entries)
-      .set({
-        title: "Weekend Trip to Tahoe",
-        content: "Changed plans and drove up to Lake Tahoe instead of the mountains.",
-        updatedAt: new Date(),
-      })
-      .where(eq(entries.id, "entry-past-3"));
-
-    // Old term Yosemite should now yield 0 results
-    const oldResults = session.search("Yosemite");
-    assert.equal(oldResults.length, 0, "Old content should be unindexed after update");
-
-    // New term Tahoe should yield 1 result
-    const newResults = session.search("Tahoe");
-    assert.equal(newResults.length, 1);
-    assert.equal(newResults[0].date, "2026-09-20");
-    assert.ok(newResults[0].snippet.includes("<mark>Tahoe</mark>"));
-
-    session.close();
-  });
-
-  // Step 7: Multiple Entries Per Day Verification
-  await t.test("Multiple entries per day: create multiple entries for the same date, verify isolation, order, and FTS5 search", async () => {
-    const session = createDrizzleBridge(TEST_DB_PATH);
-
-    const testDay = "2026-09-24";
-    const entryMorningId = "entry-same-day-morning";
-    const entryAfternoonId = "entry-same-day-afternoon";
-    const entryNightId = "entry-same-day-night";
-
-    // 1. Insert morning entry
-    await session.db.insert(entries).values({
-      id: entryMorningId,
-      date: testDay,
-      title: "Morning Sunrise Run",
-      content: "Ran 5 kilometers at 7am before breakfast. Cold morning breeze along the bay.",
-      createdAt: new Date("2026-09-24T07:00:00Z"),
-      updatedAt: new Date("2026-09-24T07:00:00Z"),
-    });
-
-    // 2. Insert afternoon entry on the SAME day
-    await session.db.insert(entries).values({
-      id: entryAfternoonId,
-      date: testDay,
-      title: "Afternoon Coffee & Sketching",
-      content: "Designed the new journal timeline layout. Drank pour-over Ethiopian beans.",
-      createdAt: new Date("2026-09-24T14:30:00Z"),
-      updatedAt: new Date("2026-09-24T14:30:00Z"),
-    });
-
-    // 3. Insert evening entry on the SAME day
-    await session.db.insert(entries).values({
-      id: entryNightId,
-      date: testDay,
-      title: "Night Stargazing",
-      content: "Clear autumn sky. Mars was visible just above the horizon.",
-      createdAt: new Date("2026-09-24T21:15:00Z"),
-      updatedAt: new Date("2026-09-24T21:15:00Z"),
-    });
-
-    // 4. Query all entries for this date
-    const dayEntries = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, testDay))
-      .orderBy(desc(entries.createdAt));
-
-    assert.equal(dayEntries.length, 3, "Must have exactly 3 entries on the same date");
-    assert.equal(dayEntries[0].id, entryNightId, "Night entry (21:15) should be first");
-    assert.equal(dayEntries[1].id, entryAfternoonId, "Afternoon entry (14:30) should be second");
-    assert.equal(dayEntries[2].id, entryMorningId, "Morning entry (07:00) should be third");
-
-    // 5. Update only the afternoon entry and verify isolation
-    await session.db
-      .update(entries)
-      .set({
-        title: "Afternoon Coffee & Drizzle Refactoring",
-        content: "Refactored multi-entry schema constraints and verified offline database durability.",
-        updatedAt: new Date("2026-09-24T15:00:00Z"),
-      })
-      .where(eq(entries.id, entryAfternoonId));
-
-    const morningEntry = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.id, entryMorningId));
-    assert.equal(morningEntry[0].title, "Morning Sunrise Run", "Morning entry should remain unchanged");
-
-    const updatedAfternoon = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.id, entryAfternoonId));
-    assert.equal(updatedAfternoon[0].title, "Afternoon Coffee & Drizzle Refactoring");
-
-    // 6. Verify full-text search finds both independent entries on that date
-    const runResults = session.search("breakfast");
-    assert.equal(runResults.length, 1);
-    assert.equal(runResults[0].id, entryMorningId);
-    assert.equal(runResults[0].date, testDay);
-
-    const refactorResults = session.search("Refactoring");
-    assert.equal(refactorResults.length, 1);
-    assert.equal(refactorResults[0].id, entryAfternoonId);
-    assert.equal(refactorResults[0].date, testDay);
-
-    session.close();
-  });
-
-  // Step 8: Main CTA Multiple Entries Per Day Workflow Verification
-  await t.test("Main CTA: Sequential creation of multiple entries on the same day", async () => {
-    const session = createDrizzleBridge(TEST_DB_PATH);
-    const today = "2026-09-26";
-
-    // Simulate in-memory list and creation function matching useDiary
-    let entriesList = [];
-    let selectedId = null;
-
-    async function handleMainCta(targetDate = today) {
-      const now = new Date();
-      const newEntry = {
-        id: `cta-entry-${entriesList.length + 1}-${Date.now()}`,
-        date: targetDate,
-        title: "",
-        body: "",
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      entriesList = [newEntry, ...entriesList];
-      selectedId = newEntry.id;
-
-      await session.db.insert(entries).values({
-        id: newEntry.id,
-        date: newEntry.date,
-        title: newEntry.title,
-        content: newEntry.body,
-        createdAt: newEntry.createdAt,
-        updatedAt: newEntry.updatedAt,
-      });
-
-      return newEntry.id;
-    }
-
-    // 1. User clicks main CTA for the first time on today
-    const firstId = await handleMainCta(today);
-    assert.ok(firstId, "First entry must be created");
-    assert.equal(entriesList.length, 1);
-
-    // 2. User types in first entry
-    entriesList[0].title = "Morning Coffee & Notes";
-    entriesList[0].body = "First entry written from main CTA.";
-    await session.db
-      .update(entries)
-      .set({ title: entriesList[0].title, content: entriesList[0].body })
-      .where(eq(entries.id, firstId));
-
-    // 3. User clicks main CTA a second time on the SAME day
-    const secondId = await handleMainCta(today);
-    assert.notEqual(firstId, secondId, "Second entry must have a distinct unique ID");
-    assert.equal(entriesList.length, 2, "List must now contain 2 entries for today");
-
-    // 4. User types in second entry
-    entriesList[0].title = "Afternoon Standup Thoughts";
-    entriesList[0].body = "Second entry written from main CTA on the same day.";
-    await session.db
-      .update(entries)
-      .set({ title: entriesList[0].title, content: entriesList[0].body })
-      .where(eq(entries.id, secondId));
-
-    // 5. User clicks main CTA a third time on the SAME day
-    const thirdId = await handleMainCta(today);
-    assert.notEqual(secondId, thirdId);
-    assert.equal(entriesList.length, 3, "List must now contain 3 entries for today");
-
-    // 6. User clicks main CTA a fourth time on the SAME day
-    const fourthAttemptId = await handleMainCta(today);
-    assert.notEqual(thirdId, fourthAttemptId, "Fourth entry must have a distinct unique ID");
-    assert.equal(entriesList.length, 4, "Sequential clicks on main CTA create distinct entries for today");
-
-    // 7. Verify all entries are persisted in SQLite under today's date
-    const dbEntriesToday = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, today));
-
-    assert.equal(dbEntriesToday.length, 4, "Database must store all 4 entries under today's date");
-
-    const savedFirst = dbEntriesToday.find((e) => e.id === firstId);
-    const savedSecond = dbEntriesToday.find((e) => e.id === secondId);
-    assert.equal(savedFirst.title, "Morning Coffee & Notes");
-    assert.equal(savedSecond.title, "Afternoon Standup Thoughts");
-
-    session.close();
-  });
-
-  // Step 9: Calendar View Selection & Future Date Rejection Verification
-  await t.test("Calendar View: Date click does not create entry, future dates blocked, explicit button creates entry", async () => {
-    const session = createDrizzleBridge(TEST_DB_PATH);
-    const today = "2026-09-26";
-    const futureDate = "2026-09-30";
-    const pastEmptyDate = "2026-09-15";
-
-    let entriesList = [];
-    let selectedId = null;
-    let calendarSelectedDate = today;
-
-    // Calendar date click behavior: DOES NOT CREATE ENTRY
-    function handleCalendarDateClick(dateStr) {
-      calendarSelectedDate = dateStr;
-      const matching = entriesList.filter((e) => e.date === dateStr);
-      if (matching.length > 0) {
-        selectedId = matching[0].id;
-      }
-      // If no matching entries, do nothing to entriesList or DB
-    }
-
-    // Explicit create button behavior: GUARDS AGAINST FUTURE DATES
-    async function handleExplicitCreateEntry(dateStr) {
-      if (dateStr > today) {
-        // Disallowed
-        return null;
-      }
-
-      const newEntry = {
-        id: `cal-entry-${Date.now()}`,
-        date: dateStr,
-        title: "",
-        content: "",
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
-
-      entriesList.push(newEntry);
-      selectedId = newEntry.id;
-
-      await session.db.insert(entries).values(newEntry);
-      return newEntry.id;
-    }
-
-    // 1. User clicks an empty past date in calendar view
-    handleCalendarDateClick(pastEmptyDate);
-    assert.equal(calendarSelectedDate, pastEmptyDate);
-    assert.equal(entriesList.length, 0, "Clicking an empty date must NEVER create an entry");
-
-    // 2. User attempts to create an entry for a FUTURE date
-    const futureResult = await handleExplicitCreateEntry(futureDate);
-    assert.equal(futureResult, null, "Creating entry for future date must be rejected");
-    assert.equal(entriesList.length, 0, "No entry must be created for future date");
-
-    const futureDbCheck = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, futureDate));
-    assert.equal(futureDbCheck.length, 0, "Database must have 0 entries for future date");
-
-    // 3. User clicks the explicit '+ Create entry for this day' button on past date
-    const createdPastId = await handleExplicitCreateEntry(pastEmptyDate);
-    assert.ok(createdPastId, "Must create entry when explicit button is clicked");
-    assert.equal(entriesList.length, 1);
-    assert.equal(entriesList[0].date, pastEmptyDate);
-
-    // 4. Verify entry persisted in SQLite
-    const pastDbCheck = await session.db
-      .select()
-      .from(entries)
-      .where(eq(entries.date, pastEmptyDate));
-    assert.equal(pastDbCheck.length, 1);
-    assert.equal(pastDbCheck[0].id, createdPastId);
-
-    // 5. Clicking on the date again now selects the existing entry without creating another
-    handleCalendarDateClick(pastEmptyDate);
-    assert.equal(selectedId, createdPastId);
-    assert.equal(entriesList.length, 1, "Length remains 1; no duplicate entry created");
-
-    session.close();
-  });
-
-  // Step 10: Markdown Dual-Sync: .md file formatting, YAML frontmatter, title change cleanup, and deletion
-  await t.test("Markdown Dual-Sync: .md generation with YAML frontmatter, safe filename, rename cleanup, and deletion", async () => {
-    const session = createDrizzleBridge(TEST_DB_PATH);
-    const testMdDir = path.join(process.cwd(), "tests", "test_second_diary_md");
-    if (!fs.existsSync(testMdDir)) {
-      fs.mkdirSync(testMdDir, { recursive: true });
-    }
-
-    // Mirror Rust save_markdown_entry logic
-    function sanitizeFilename(title) {
-      const clean = title.replace(/[^a-zA-Z0-9 _-]/g, "_").trim();
-      const truncated = clean.slice(0, 50).trim();
-      return truncated || "Untitled";
-    }
-
-    function saveMarkdownEntry({ id, date, timeStr, title, content, tags, createdAt, updatedAt }) {
-      // Remove any existing .md file matching this id
-      const files = fs.readdirSync(testMdDir);
-      for (const file of files) {
-        if (file.endsWith(".md")) {
-          const filePath = path.join(testMdDir, file);
-          const text = fs.readFileSync(filePath, "utf-8");
-          if (text.includes(`id: "${id}"`) || text.includes(`id: ${id}`)) {
-            fs.unlinkSync(filePath);
-          }
-        }
-      }
-
-      const cleanTime = timeStr.replace(/:/g, "");
-      const cleanTitle = sanitizeFilename(title);
-      const shortId = id.length >= 8 ? id.slice(0, 8) : id;
-      const filename = `${date}_${cleanTime}_${cleanTitle}_${shortId}.md`;
-      const filePath = path.join(testMdDir, filename);
-
-      const tagsYaml = tags.length === 0 ? "[]" : `[${tags.map((t) => `"${t}"`).join(", ")}]`;
-      const titleDisplay = title.trim() || "Untitled Entry";
-
-      const mdContent = `---
-id: "${id}"
-date: "${date}"
+// Markdown entry serializer matching src-tauri/src/lib.rs
+function serializeMarkdownEntry(entry) {
+  const timeStr = entry.time || "12:00";
+  const cleanTime = timeStr.replace(":", "");
+  const cleanTitle = sanitizeFilename(entry.title || "");
+  const shortId = entry.id.length >= 8 ? entry.id.slice(0, 8) : entry.id;
+  const filename = `${entry.date}_${cleanTime}_${cleanTitle}_${shortId}.md`;
+
+  const tagsYaml =
+    entry.tags && entry.tags.length > 0
+      ? `[${entry.tags.map((t) => `"${t}"`).join(", ")}]`
+      : "[]";
+
+  const titleDisplay = (entry.title || "").trim() || "Untitled Entry";
+  const content = entry.content || "";
+
+  const mdText = `---
+id: "${entry.id}"
+date: "${entry.date}"
 time: "${timeStr}"
-title: "${title.replace(/"/g, '\\"')}"
+title: "${(entry.title || "").replace(/"/g, '\\"')}"
 tags: ${tagsYaml}
-createdAt: "${createdAt}"
-updatedAt: "${updatedAt}"
+createdAt: "${entry.createdAt || new Date().toISOString()}"
+updatedAt: "${entry.updatedAt || new Date().toISOString()}"
 ---
 
 # ${titleDisplay}
 
 ${content}
 `;
-      fs.writeFileSync(filePath, mdContent, "utf-8");
-      return filePath;
-    }
 
-    function deleteMarkdownEntry(id) {
-      const files = fs.readdirSync(testMdDir);
-      let deleted = false;
-      for (const file of files) {
-        if (file.endsWith(".md")) {
-          const filePath = path.join(testMdDir, file);
-          const text = fs.readFileSync(filePath, "utf-8");
-          if (text.includes(`id: "${id}"`) || text.includes(`id: ${id}`)) {
-            fs.unlinkSync(filePath);
-            deleted = true;
-          }
-        }
+  return { filename, mdText };
+}
+
+// Markdown entry parser matching src-tauri/src/lib.rs
+function parseMarkdownEntry(rawContent, fallbackId = "") {
+  const normalized = rawContent.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---")) return null;
+
+  const rest = normalized.slice(3);
+  const endIdx = rest.indexOf("\n---\n");
+  if (endIdx === -1) return null;
+
+  const frontmatter = rest.slice(0, endIdx);
+  const bodyPart = rest.slice(endIdx + 5);
+
+  let id = "";
+  let date = "";
+  let timeStr = "";
+  let title = "";
+  let tags = [];
+  let createdAt = "";
+  let updatedAt = "";
+
+  for (const line of frontmatter.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("id:")) {
+      id = trimmed.slice(3).trim().replace(/^["']|["']$/g, "");
+    } else if (trimmed.startsWith("date:")) {
+      date = trimmed.slice(5).trim().replace(/^["']|["']$/g, "");
+    } else if (trimmed.startsWith("time:")) {
+      timeStr = trimmed.slice(5).trim().replace(/^["']|["']$/g, "");
+    } else if (trimmed.startsWith("title:")) {
+      title = trimmed.slice(6).trim().replace(/^["']|["']$/g, "").replace(/\\"/g, '"');
+    } else if (trimmed.startsWith("tags:")) {
+      const val = trimmed.slice(5).trim();
+      if (val.startsWith("[") && val.endsWith("]")) {
+        tags = val
+          .slice(1, -1)
+          .split(",")
+          .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+          .filter(Boolean);
       }
-      return deleted;
+    } else if (trimmed.startsWith("createdAt:")) {
+      createdAt = trimmed.slice(10).trim().replace(/^["']|["']$/g, "");
+    } else if (trimmed.startsWith("updatedAt:")) {
+      updatedAt = trimmed.slice(10).trim().replace(/^["']|["']$/g, "");
     }
+  }
 
-    // 1. Create entry in SQLite & dual-sync to .md file
-    const entryId = "md-entry-test-1";
-    const date = "2026-09-26";
-    const timeStr = "14:30";
-    const title = "Hiking in Redwood Regional Park";
-    const content = "The redwood canopy provided complete shade. Observed red-tailed hawks.\n\n#nature #hiking";
-    const createdAt = "2026-09-26T14:30:00.000Z";
-    const updatedAt = "2026-09-26T14:30:00.000Z";
+  if (!id) id = fallbackId;
 
-    await session.db.insert(entries).values({
-      id: entryId,
-      date,
-      title,
-      content,
-      createdAt: new Date(createdAt),
-      updatedAt: new Date(updatedAt),
-    });
-
-    const savedFilePath = saveMarkdownEntry({
-      id: entryId,
-      date,
-      timeStr,
-      title,
-      content,
-      tags: ["nature", "hiking"],
-      createdAt,
-      updatedAt,
-    });
-
-    // Verify .md file exists on disk
-    assert.ok(fs.existsSync(savedFilePath), "Markdown file must exist on disk");
-    const filename = path.basename(savedFilePath);
-    assert.ok(filename.startsWith("2026-09-26_1430_Hiking in Redwood Regional Park_md-entry"));
-    assert.ok(filename.endsWith(".md"));
-
-    // Verify YAML frontmatter & body structure
-    const fileText = fs.readFileSync(savedFilePath, "utf-8");
-    assert.ok(fileText.includes('id: "md-entry-test-1"'));
-    assert.ok(fileText.includes('date: "2026-09-26"'));
-    assert.ok(fileText.includes('time: "14:30"'));
-    assert.ok(fileText.includes('title: "Hiking in Redwood Regional Park"'));
-    assert.ok(fileText.includes('tags: ["nature", "hiking"]'));
-    assert.ok(fileText.includes("# Hiking in Redwood Regional Park"));
-    assert.ok(fileText.includes("The redwood canopy provided complete shade."));
-
-    // 2. Update entry with a new title (rename)
-    const newTitle = "Hiking in Redwood Regional Park (West Ridge Trail)";
-    const newUpdatedAt = "2026-09-26T16:00:00.000Z";
-
-    await session.db
-      .update(entries)
-      .set({
-        title: newTitle,
-        updatedAt: new Date(newUpdatedAt),
-      })
-      .where(eq(entries.id, entryId));
-
-    const updatedFilePath = saveMarkdownEntry({
-      id: entryId,
-      date,
-      timeStr,
-      title: newTitle,
-      content,
-      tags: ["nature", "hiking"],
-      createdAt,
-      updatedAt: newUpdatedAt,
-    });
-
-    // Verify old file was cleanly removed and new file created (no orphans)
-    assert.ok(!fs.existsSync(savedFilePath), "Old markdown file must be deleted upon title rename");
-    assert.ok(fs.existsSync(updatedFilePath), "New markdown file with updated title must exist");
-    const updatedFiles = fs.readdirSync(testMdDir).filter((f) => f.endsWith(".md"));
-    assert.equal(updatedFiles.length, 1, "Only 1 .md file should exist for this entry");
-
-    // 3. Delete entry and verify .md file is removed
-    await session.db.delete(entries).where(eq(entries.id, entryId));
-    const wasDeleted = deleteMarkdownEntry(entryId);
-    assert.equal(wasDeleted, true, "deleteMarkdownEntry should report success");
-
-    const remainingFiles = fs.readdirSync(testMdDir).filter((f) => f.endsWith(".md"));
-    assert.equal(remainingFiles.length, 0, "Markdown file must be removed when entry is deleted");
-
-    // Clean up test markdown directory
-    fs.rmSync(testMdDir, { recursive: true, force: true });
-    session.close();
-  });
-
-  // Step 11: Multi-Tag Management: Batch adding tags, comma/space tokenization, and body syncing
-  await t.test("Multi-Tag Management: Batch tag addition, comma/space tokenization, and body syncing", async () => {
-    function cleanTag(text) {
-      return text
-        .trim()
-        .replace(/^#+/, "")
-        .replace(/[^\w-]/g, "-")
-        .replace(/-+/g, "-")
-        .toLowerCase();
+  let hour = 12.0;
+  if (timeStr && timeStr.includes(":")) {
+    const [h, m] = timeStr.split(":").map(Number);
+    if (!isNaN(h) && !isNaN(m)) {
+      hour = h + m / 60.0;
     }
+  }
 
-    function tokenizeTags(rawInput) {
-      return rawInput
-        .split(/[, \n\t]+/)
-        .map(cleanTag)
-        .filter((t) => t.length > 0);
+  let content = bodyPart.trim();
+  if (content.startsWith("# ")) {
+    const newlineIdx = content.indexOf("\n");
+    if (newlineIdx !== -1) {
+      content = content.slice(newlineIdx + 1).trim();
+    } else {
+      content = "";
     }
+  }
 
-    function syncTagsToBody(body, newTags) {
-      const existingTags = Array.from(
-        new Set((body.match(/#([\w-]+)/g) || []).map((t) => t.slice(1)))
-      );
-      let updated = body;
-      for (const oldTag of existingTags) {
-        if (!newTags.includes(oldTag)) {
-          const re = new RegExp(`(?:\\s*)#${oldTag}\\b`, "g");
-          updated = updated.replace(re, "");
-        }
-      }
-      const remainingTags = Array.from(
-        new Set((updated.match(/#([\w-]+)/g) || []).map((t) => t.slice(1)))
-      );
-      const tagsToAdd = newTags.filter((t) => !remainingTags.includes(t));
-      if (tagsToAdd.length > 0) {
-        const tagString = tagsToAdd.map((t) => `#${t}`).join(" ");
-        const trimmed = updated.trimEnd();
-        updated = trimmed ? `${trimmed} ${tagString}` : tagString;
-      }
-      return updated;
-    }
+  return {
+    id,
+    date,
+    hour: Math.round(hour * 10) / 10,
+    title,
+    content,
+    tags,
+    createdAt: new Date(createdAt),
+    updatedAt: new Date(updatedAt),
+  };
+}
 
-    function parseTags(text) {
-      const match = text.match(/#([\w-]+)/g);
-      return match ? Array.from(new Set(match.map((t) => t.slice(1)))) : [];
-    }
+// Search helper matching search_markdown_entries
+function searchMarkdownEntries(entries, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const results = [];
 
-    // 1. Test tokenizing multiple tags in one go
-    const rawTokens = "morning, coffee, deep-work ideas,   reflection";
-    const tokens = tokenizeTags(rawTokens);
-    assert.deepEqual(tokens, ["morning", "coffee", "deep-work", "ideas", "reflection"]);
+  for (const entry of entries) {
+    const titleLower = (entry.title || "").toLowerCase();
+    const contentLower = (entry.content || "").toLowerCase();
+    const tagsJoined = (entry.tags || []).join(" ").toLowerCase();
 
-    // 2. Add multiple tags to an entry body
-    const initialBody = "Wrote three paragraphs before breakfast.";
-    const bodyWithTags = syncTagsToBody(initialBody, tokens);
-    assert.equal(
-      bodyWithTags,
-      "Wrote three paragraphs before breakfast. #morning #coffee #deep-work #ideas #reflection"
+    const allMatch = tokens.every(
+      (t) =>
+        titleLower.includes(t) ||
+        contentLower.includes(t) ||
+        tagsJoined.includes(t)
     );
-    assert.deepEqual(parseTags(bodyWithTags), ["morning", "coffee", "deep-work", "ideas", "reflection"]);
 
-    // 3. Remove a tag and add another
-    const updatedTags = ["morning", "deep-work", "creative", "reflection"];
-    const modifiedBody = syncTagsToBody(bodyWithTags, updatedTags);
-    assert.deepEqual(parseTags(modifiedBody), ["morning", "deep-work", "reflection", "creative"]);
-    assert.ok(!modifiedBody.includes("#coffee"), "Removed tag #coffee should no longer be in body");
-    assert.ok(!modifiedBody.includes("#ideas"), "Removed tag #ideas should no longer be in body");
-    assert.ok(modifiedBody.includes("#creative"), "Newly added tag #creative should be present");
+    if (allMatch) {
+      const firstToken = tokens[0];
+      const pos = contentLower.indexOf(firstToken);
+      let snippet = "";
+
+      if (pos >= 0) {
+        const start = Math.max(0, pos - 30);
+        const end = Math.min(entry.content.length, pos + firstToken.length + 60);
+        const raw = entry.content.slice(start, end);
+        const prefix = start > 0 ? "..." : "";
+        const suffix = end < entry.content.length ? "..." : "";
+        const regex = new RegExp(`(${firstToken})`, "gi");
+        snippet = `${prefix}${raw.replace(regex, "<mark>$1</mark>")}${suffix}`;
+      } else if (entry.content) {
+        snippet = `${entry.content.slice(0, 80)}...`;
+      } else {
+        snippet = `Matched in title: ${entry.title}`;
+      }
+
+      results.push({
+        id: entry.id,
+        date: entry.date,
+        title: entry.title,
+        snippet,
+        rank: titleLower.includes(q) ? 1 : 2,
+      });
+    }
+  }
+
+  results.sort((a, b) => a.rank - b.rank);
+  return results;
+}
+
+test("Pure Markdown Diary Storage & Search Verification", async (t) => {
+  // Ensure clean test directory
+  if (fs.existsSync(TEST_DIR)) {
+    fs.rmSync(TEST_DIR, { recursive: true, force: true });
+  }
+  fs.mkdirSync(TEST_DIR, { recursive: true });
+
+  const today = "2026-09-28";
+  const yesterday = "2026-09-27";
+  const futureDate = "2026-10-05";
+
+  // Step 1: Create an entry as a pure Markdown file
+  await t.test("Step 1: Save new entry to disk as .md file with YAML frontmatter", async () => {
+    const entryId = "entry-001-morning";
+    const entry = {
+      id: entryId,
+      date: today,
+      time: "07:30",
+      title: "First Light Over the City",
+      content: "Sunrise filtered through the blinds. Brewing Ethiopian coffee. #morning #coffee",
+      tags: ["morning", "coffee"],
+      createdAt: "2026-09-28T02:00:00.000Z",
+      updatedAt: "2026-09-28T02:00:00.000Z",
+    };
+
+    const { filename, mdText } = serializeMarkdownEntry(entry);
+    const filePath = path.join(TEST_DIR, filename);
+    fs.writeFileSync(filePath, mdText, "utf8");
+
+    assert.ok(fs.existsSync(filePath), "Markdown file must exist on disk");
+    const raw = fs.readFileSync(filePath, "utf8");
+    assert.match(raw, /^---\nid: "entry-001-morning"/, "Must start with YAML frontmatter id");
+    assert.match(raw, /tags: \["morning", "coffee"\]/, "Must contain YAML tags array");
+    assert.match(raw, /# First Light Over the City/, "Must contain markdown header");
+    assert.match(raw, /Sunrise filtered through the blinds/, "Must contain body content");
   });
 
-  // Cleanup
-  if (fs.existsSync(TEST_DB_PATH)) {
-    fs.unlinkSync(TEST_DB_PATH);
+  // Step 2: Read and parse Markdown entries from disk
+  await t.test("Step 2: Read directory and parse Markdown entries accurately", async () => {
+    const files = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    assert.equal(files.length, 1);
+
+    const raw = fs.readFileSync(path.join(TEST_DIR, files[0]), "utf8");
+    const parsed = parseMarkdownEntry(raw);
+
+    assert.ok(parsed);
+    assert.equal(parsed.id, "entry-001-morning");
+    assert.equal(parsed.date, today);
+    assert.equal(parsed.hour, 7.5);
+    assert.equal(parsed.title, "First Light Over the City");
+    assert.equal(
+      parsed.content,
+      "Sunrise filtered through the blinds. Brewing Ethiopian coffee. #morning #coffee"
+    );
+    assert.deepEqual(parsed.tags, ["morning", "coffee"]);
+  });
+
+  // Step 3: Multiple entries per day on the same date
+  await t.test("Step 3: Sequential multiple entries per day produce distinct .md files", async () => {
+    const secondEntry = {
+      id: "entry-002-afternoon",
+      date: today,
+      time: "14:15",
+      title: "Afternoon Walk in the Arboretum",
+      content: "Walked 6km along the river trail. Maples are showing early red. #nature #walk",
+      tags: ["nature", "walk"],
+      createdAt: "2026-09-28T08:45:00.000Z",
+      updatedAt: "2026-09-28T08:45:00.000Z",
+    };
+
+    const thirdEntry = {
+      id: "entry-003-evening",
+      date: today,
+      time: "21:00",
+      title: "Late Reading Notes",
+      content: "Reading architecture theory before sleep. Silent room. #books",
+      tags: ["books"],
+      createdAt: "2026-09-28T15:30:00.000Z",
+      updatedAt: "2026-09-28T15:30:00.000Z",
+    };
+
+    for (const e of [secondEntry, thirdEntry]) {
+      const { filename, mdText } = serializeMarkdownEntry(e);
+      fs.writeFileSync(path.join(TEST_DIR, filename), mdText, "utf8");
+    }
+
+    const files = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    assert.equal(files.length, 3, "Directory must have 3 distinct markdown files for today");
+  });
+
+  // Step 4: Chronological sorting (newest date first, then newest hour)
+  await t.test("Step 4: Chronological sorting orders entries newest date & hour first", async () => {
+    // Add an entry for yesterday
+    const pastEntry = {
+      id: "entry-000-yesterday",
+      date: yesterday,
+      time: "18:00",
+      title: "Sunday Rain",
+      content: "Heavy rain all afternoon. Listening to piano music.",
+      tags: ["rain", "music"],
+      createdAt: "2026-09-27T12:30:00.000Z",
+      updatedAt: "2026-09-27T12:30:00.000Z",
+    };
+    const { filename, mdText } = serializeMarkdownEntry(pastEntry);
+    fs.writeFileSync(path.join(TEST_DIR, filename), mdText, "utf8");
+
+    const files = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    assert.equal(files.length, 4);
+
+    const parsedList = files.map((f) => parseMarkdownEntry(fs.readFileSync(path.join(TEST_DIR, f), "utf8")));
+
+    parsedList.sort((a, b) => {
+      const dateCmp = b.date.localeCompare(a.date);
+      if (dateCmp !== 0) return dateCmp;
+      return b.hour - a.hour;
+    });
+
+    assert.equal(parsedList[0].id, "entry-003-evening", "Today 21:00 must be first");
+    assert.equal(parsedList[1].id, "entry-002-afternoon", "Today 14:15 must be second");
+    assert.equal(parsedList[2].id, "entry-001-morning", "Today 07:30 must be third");
+    assert.equal(parsedList[3].id, "entry-000-yesterday", "Yesterday must be last");
+  });
+
+  // Step 5: Full-text search with token matching and snippet marks
+  await t.test("Step 5: Full-text search finds matches and returns <mark> snippets", async () => {
+    const files = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    const allEntries = files.map((f) => parseMarkdownEntry(fs.readFileSync(path.join(TEST_DIR, f), "utf8")));
+
+    // Search for "coffee"
+    const coffeeResults = searchMarkdownEntries(allEntries, "coffee");
+    assert.equal(coffeeResults.length, 1);
+    assert.equal(coffeeResults[0].id, "entry-001-morning");
+    assert.match(coffeeResults[0].snippet, /<mark>coffee<\/mark>/i);
+
+    // Search for "arboretum"
+    const natureResults = searchMarkdownEntries(allEntries, "arboretum");
+    assert.equal(natureResults.length, 1);
+    assert.equal(natureResults[0].id, "entry-002-afternoon");
+
+    // Search by tag "books"
+    const bookResults = searchMarkdownEntries(allEntries, "books");
+    assert.equal(bookResults.length, 1);
+    assert.equal(bookResults[0].id, "entry-003-evening");
+
+    // Search with non-matching term
+    const emptyResults = searchMarkdownEntries(allEntries, "nonexistentwordxyz");
+    assert.equal(emptyResults.length, 0);
+  });
+
+  // Step 6: Updating title renames file and removes old filename
+  await t.test("Step 6: Renaming entry title updates file and cleans old filename", async () => {
+    const filesBefore = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    const oldFile = filesBefore.find((f) => {
+      const content = fs.readFileSync(path.join(TEST_DIR, f), "utf8");
+      return content.includes('id: "entry-001-morning"');
+    });
+    assert.ok(oldFile, "Old filename must exist");
+
+    // Update title
+    const updatedEntry = {
+      id: "entry-001-morning",
+      date: today,
+      time: "07:30",
+      title: "Dawn Reverie & Fresh Espresso",
+      content: "Updated content for the morning entry. #morning #coffee",
+      tags: ["morning", "coffee"],
+      createdAt: "2026-09-28T02:00:00.000Z",
+      updatedAt: "2026-09-28T02:15:00.000Z",
+    };
+
+    // Remove any file containing this entry ID (mirroring Rust save_markdown_entry)
+    for (const f of fs.readdirSync(TEST_DIR)) {
+      if (f.endsWith(".md")) {
+        const content = fs.readFileSync(path.join(TEST_DIR, f), "utf8");
+        if (content.includes(`id: "entry-001-morning"`)) {
+          fs.unlinkSync(path.join(TEST_DIR, f));
+        }
+      }
+    }
+
+    const { filename: newFilename, mdText } = serializeMarkdownEntry(updatedEntry);
+    fs.writeFileSync(path.join(TEST_DIR, newFilename), mdText, "utf8");
+
+    const filesAfter = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    assert.equal(filesAfter.length, 4, "File count must remain 4");
+    assert.ok(!fs.existsSync(path.join(TEST_DIR, oldFile)), "Old filename must be removed");
+    assert.ok(fs.existsSync(path.join(TEST_DIR, newFilename)), "New filename must exist");
+
+    const updatedRaw = fs.readFileSync(path.join(TEST_DIR, newFilename), "utf8");
+    const parsed = parseMarkdownEntry(updatedRaw);
+    assert.equal(parsed.title, "Dawn Reverie & Fresh Espresso");
+  });
+
+  // Step 7: Deleting an entry removes the .md file from disk
+  await t.test("Step 7: Deleting entry unlinks .md file from disk", async () => {
+    const targetId = "entry-003-evening";
+
+    let deleted = false;
+    for (const f of fs.readdirSync(TEST_DIR)) {
+      if (f.endsWith(".md")) {
+        const content = fs.readFileSync(path.join(TEST_DIR, f), "utf8");
+        if (content.includes(`id: "${targetId}"`)) {
+          fs.unlinkSync(path.join(TEST_DIR, f));
+          deleted = true;
+        }
+      }
+    }
+
+    assert.ok(deleted, "File must have been found and deleted");
+    const remaining = fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".md"));
+    assert.equal(remaining.length, 3, "Only 3 files should remain");
+
+    const ids = remaining.map((f) => {
+      const p = parseMarkdownEntry(fs.readFileSync(path.join(TEST_DIR, f), "utf8"));
+      return p.id;
+    });
+    assert.ok(!ids.includes(targetId), "Deleted entry ID must not exist in directory");
+  });
+
+  // Step 8: Future date guard
+  await t.test("Step 8: Prevent creating entries for future dates", async () => {
+    function canCreateEntryForDate(targetDate, currentDate = today) {
+      if (targetDate > currentDate) return false;
+      return true;
+    }
+
+    assert.equal(canCreateEntryForDate(futureDate), false, "Future date must be blocked");
+    assert.equal(canCreateEntryForDate(today), true, "Today must be allowed");
+    assert.equal(canCreateEntryForDate(yesterday), true, "Past date must be allowed");
+  });
+
+  // Cleanup test directory
+  if (fs.existsSync(TEST_DIR)) {
+    fs.rmSync(TEST_DIR, { recursive: true, force: true });
   }
 });
